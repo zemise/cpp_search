@@ -10,7 +10,7 @@
 |-----|--------|-----------|------------|------|
 | `windows-installer` | `windows-2022` | Visual Studio 2022 x64 | `labelprint-v1.2.10-windows-x64-vs2022-win7.zip` | 安装包、更新 zip、manifest |
 
-CI 会从 LabelPrint GitHub Release 下载 `v1.2.10` 的 Win7 兼容包，通过 `build_main.ps1 -LabelPrintPackagePath` 传给 CMake，再用 `packaging/LISWorkbench.nsi` 打包。产物可从 Actions 页面下载 Artifacts。安装包会包含 `lis_workbench.exe` 和自动更新器 `Updater.exe`。出于隐私考虑，HIV 统计表 DOCX 模版不随安装包发布，需要在页面中通过 `上传模版` 放入安装目录 `templates\HIVStatisticsTemplate.docx`。
+CI 会从 LabelPrint GitHub Release 下载 `v1.2.10` 的 Win7 兼容包，通过 `build_main.ps1 -LabelPrintPackagePath` 传给 CMake，再用 `packaging/LISWorkbench.nsi` 打包。产物可从 Actions 页面下载 Artifacts。安装包会包含 `lis_workbench.exe` 和自动更新器 `Updater.exe`。出于隐私考虑，HIV 统计表 DOCX 模版不随安装包发布，需要在页面中通过 `上传模版` 放入安装目录 `templates\HIVStatisticsTemplate.docx`。常用电话 RTF 文件同样不随安装包发布，现场可在 `常用电话` 页面上传，或自行放入安装目录 `documents`。
 
 推送与 `src/version.h` 一致的 `v*` 标签时，例如 `v2026.07.02`，CI 会自动创建或更新同名 GitHub Release，并上传；普通分支 push 和 PR 只生成 Actions artifact，不发布 Release。
 
@@ -28,7 +28,7 @@ out/windows/update/updates/LISWorkbench-<version>-win7-win11.zip
 ```
 
 Actions 会上传 `LISWorkbench-Updates-<version>-win7-win11` artifact。把其中的 `updates` 目录整体放到共享目录或 HTTP 目录后，系统设置页的更新源可分别指向该目录或其中的 `manifest.json`。设置页默认选择共享文件夹，并只显示当前更新源对应的共享目录或 HTTP 地址。manifest 与 zip 同目录，便于同一份 manifest 兼容共享目录、普通 HTTP 和 GitHub Release。
-更新 zip 不包含 HIV 统计表 DOCX 模版；自动更新不会覆盖现场已上传的 `templates\HIVStatisticsTemplate.docx`。
+更新 zip 不包含 HIV 统计表 DOCX 模版和常用电话 RTF 文件；自动更新不会覆盖现场已上传的 `templates\HIVStatisticsTemplate.docx` 或 `documents` 目录。
 
 使用 GitHub Release 作为外网更新源时，系统设置页的 HTTP 地址填写：
 

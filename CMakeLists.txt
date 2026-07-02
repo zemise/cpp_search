@@ -161,6 +161,7 @@ add_executable(main_app WIN32
     src/hiv_statistics_module.cpp
     src/machine_picker_popup.cpp
     src/mchc_correction_module.cpp
+    src/phone_directory_module.cpp
     src/quality_control_module.cpp
     src/quality_control_settings_dialog.cpp
     src/quality_control_store.cpp
