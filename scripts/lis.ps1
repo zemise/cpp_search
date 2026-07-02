@@ -15,7 +15,7 @@ param(
     [string]$Generator = "",
     [ValidateSet("auto", "github", "local", "package")]
     [string]$LabelPrintSource = "auto",
-    [string]$LabelPrintVersion = "v1.2.9",
+    [string]$LabelPrintVersion = "v1.2.10",
     [string]$LabelPrintLocalPath = "",
     [string]$LabelPrintPackagePath = "",
     [string]$AppVersion = "",

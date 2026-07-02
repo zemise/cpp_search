@@ -13,8 +13,8 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  LABELPRINT_VERSION: v1.2.9
-  LABELPRINT_WIN7_ASSET: labelprint-v1.2.9-windows-x64-vs2022-win7.zip
+  LABELPRINT_VERSION: v1.2.10
+  LABELPRINT_WIN7_ASSET: labelprint-v1.2.10-windows-x64-vs2022-win7.zip
 
 jobs:
   windows-installer:

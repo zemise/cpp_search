@@ -146,7 +146,7 @@
   - `查询检验结果` 窗口可按当前病人号或姓名查询 LIS 结果；已确认输血申请 `Patient_NO` 与 `LS_AS_REPORT.REG_NO` 同口径，按病人号查询时报告列表和摘要均直接过滤 `LS_AS_REPORT.REG_NO`；按名字查询时会先用当前病人号获取 `LS_AS_REPORT.PAT_PHONE`，取到电话后追加姓名+电话约束以减少重名误匹配，并在检验摘要区下方显示身份匹配可信度提示；摘要区根据可配置项目代码显示最近一次血型鉴定、血红蛋白/血小板、不规则抗体筛查和直接抗人球蛋白试验摘要，新项目显示为“不规则”和“直抗”两行。
   - `查询检验结果` 窗口右侧报告列表的 `样本号` 与检验结果查询页一致，来自 `LS_AS_REPORT.OPER_NO`，并展示 `LS_AS_REPORT.ROOM_CODE / MACH_CODE` 便于配置排除规则；查询完成状态栏会显示命中系统设置中 `血型仪器`、`血常规仪器` 的报告数量。
   - `查询检验结果` 窗口的报告列表使用专用轻量 SQL，仅读取弹窗展示和选择所需字段，并按 `BloodLisExcludeMachines` 下推排除不想展示的科室/仪器；组合项目列表和摘要信息分别走独立后台查询，组合项目列表不等待摘要查询完成。
-- GitHub Actions 会在 `windows-2022` runner 上使用 VS2022 和 LabelPrint `v1.2.9` Win7 兼容 release 包生成 `LISWorkbench-Setup-<version>-win7-win11.exe` 安装包。该包按 Windows 7 兼容目标构建，目标覆盖 Windows 7 到 Windows 11；实际运行验证仍需在对应系统或虚拟机中完成。
+- GitHub Actions 会在 `windows-2022` runner 上使用 VS2022 和 LabelPrint `v1.2.10` Win7 兼容 release 包生成 `LISWorkbench-Setup-<version>-win7-win11.exe` 安装包。该包按 Windows 7 兼容目标构建，目标覆盖 Windows 7 到 Windows 11；实际运行验证仍需在对应系统或虚拟机中完成。
 
 暂未实现：
 
@@ -269,7 +269,7 @@ VS 原生构建的 `lis_workbench.exe` 默认静态链接 MSVC runtime，Release
 .\lis.ps1 run
 .\lis.ps1 clean
 .\lis.ps1 package -LabelPrintSource github
-.\lis.ps1 rebuild-package -LabelPrintSource github -LabelPrintVersion v1.2.9
+.\lis.ps1 rebuild-package -LabelPrintSource github -LabelPrintVersion v1.2.10
 ```
 
 **macOS** — 根目录 `Makefile`（MinGW 交叉编译）：
@@ -284,7 +284,7 @@ make install
 
 项目按 Windows 7 兼容目标编译，CMake 会为 Win32 目标统一设置 `WINVER/_WIN32_WINNT=0x0601`。代码中不能直接导入 Windows 8/10 才有的 API；需要使用时应通过 `GetProcAddress` 动态探测并提供 Win7 回退，避免在 Win7 上出现 `CreateFile2`、`GetDpiForWindow` 等入口点缺失错误。
 
-面向 Windows 7 打包时需要安装 VS 2022 Build Tools，并优先使用 LabelPrint 的 `windows-x64-vs2022-win7` release 包，例如 `.\lis.ps1 rebuild-package -LabelPrintSource github -LabelPrintVersion v1.2.9`。不要把 VS 2026 的 CRT DLL 打入安装目录，否则可能出现 `GetSystemTimePreciseAsFileTime` 等 Win8+ 入口点缺失。只面向 Windows 10/11 时可以显式使用 `-Generator "Visual Studio 18 2026"` 和对应的 LabelPrint VS2026 release 包。
+面向 Windows 7 打包时需要安装 VS 2022 Build Tools，并优先使用 LabelPrint 的 `windows-x64-vs2022-win7` release 包，例如 `.\lis.ps1 rebuild-package -LabelPrintSource github -LabelPrintVersion v1.2.10`。不要把 VS 2026 的 CRT DLL 打入安装目录，否则可能出现 `GetSystemTimePreciseAsFileTime` 等 Win8+ 入口点缺失。只面向 Windows 10/11 时可以显式使用 `-Generator "Visual Studio 18 2026"` 和对应的 LabelPrint VS2026 release 包。
 
 ## 使用说明
 
