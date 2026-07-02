@@ -14,6 +14,38 @@ namespace {
 
 constexpr const wchar_t* DEFAULT_BARCODE_PRINTER_NAME = L"Xprinter XP-360B #2";
 
+#if defined(LIS_HAS_LABELPRINT)
+labelprint::MedicalLabelLayout zebraMedicalLabelLayout() {
+    labelprint::MedicalLabelLayout layout;
+    const auto& zebra = labelprint::PrinterProfiles::zebra_zd888();
+    layout.settings.darkness = zebra.darkness;
+    layout.settings.printSpeed = zebra.speed;
+    layout.settings.quantity = 1;
+    return layout;
+}
+
+bool printZebraMedicalLabelWithoutFallback(const labelprint::MedicalLabelData& data,
+                                           const std::wstring& printer_name) {
+    const auto model = labelprint::detectMedicalLabelPrinterModel(printer_name);
+    if (model != labelprint::MedicalLabelPrinterModel::ZebraZd888) {
+        return false;
+    }
+
+    labelprint::PrinterProfile profile = labelprint::PrinterProfiles::zebra_zd888();
+    profile.nativeChineseFontFallback.clear();
+
+    labelprint::LabelDocument doc = labelprint::buildMedicalLabel(data, zebraMedicalLabelLayout());
+    labelprint::ZplBackend backend;
+    labelprint::PrintJob job = backend.render(doc, profile);
+
+    labelprint::PrinterConnection conn;
+    conn.wideName = printer_name;
+    labelprint::WindowsRawTransport transport;
+    transport.send(job, conn);
+    return true;
+}
+#endif
+
 void append_detail_line(std::wstring& message, const wchar_t* label, const std::string& value) {
     message += label;
     message += utf8_to_wide(value);
@@ -68,6 +100,10 @@ void print_barcode_label(const BarcodeLabelPayload& payload, const std::wstring&
     data.department = payload.department;
     data.patientId = payload.patient_id;
     data.timestamp = payload.timestamp;
+
+    if (printZebraMedicalLabelWithoutFallback(data, printer_name)) {
+        return;
+    }
 
     labelprint::MedicalLabelPrintOptions options;
     options.model = labelprint::MedicalLabelPrinterModel::Auto;

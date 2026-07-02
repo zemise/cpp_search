@@ -9,6 +9,7 @@
 - **HIV 汇总显示优化**：上方样本来源分类表将 `合计` 调整为第一行显示，并用浅蓝背景突出；DOCX 统计表导出仍保持原模板占位符顺序。
 - **HIV 明细联动常规报告**：下方明细列表支持双击行跳转到 `常规报告` 页面，复用现有 `RegularReportOpenTarget + WM_REGULAR_OPEN_REPORT` 机制，并携带报告号、样本号、检验日期、仪器和检验室代码定位目标报告。
 - **LabelPrint 依赖更新**：打包脚本、GitHub Actions 和 Windows 打包文档默认引用 LabelPrint `v1.2.10` Win7 兼容 release 包。
+- **Zebra ZD888t 打印适配**：本项目检测到 Zebra/ZD888t 时复用 LabelPrint Zebra 测试打印的默认排版布局，并仅使用 `E:SIMSUN.TTF` 输出中文，避免 `E:CSONG.TTF` fallback 叠印造成文字显示不全；其它打印机仍走 LabelPrint 自动识别路径。
 - 版本号 v2026.06.30。
 
 ## v2026.06.25
