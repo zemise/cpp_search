@@ -32,9 +32,12 @@ constexpr int IDC_RELOAD = 17003;
 constexpr int IDC_FIND_EDIT = 17005;
 constexpr int IDC_VIEWER = 17007;
 constexpr int IDT_AUTO_SEARCH = 17020;
-constexpr int IDT_SELECT_SEARCH_TEXT = 17021;
 constexpr UINT WM_PHONE_FOCUS_SEARCH = WM_APP + 71;
-constexpr UINT AUTO_SELECT_DELAY_MS = 1000;
+constexpr int VIEWER_PAGE_MAX_W = 880;
+const COLORREF kPhoneBg = RGB(243, 246, 250);
+const COLORREF kPhonePanel = RGB(255, 255, 255);
+const COLORREF kPhoneBorder = RGB(229, 234, 241);
+const COLORREF kPhoneSubtleBorder = RGB(229, 234, 241);
 
 struct PhoneDirectoryState {
     ModuleContext ctx;
@@ -45,6 +48,8 @@ struct PhoneDirectoryState {
     HWND viewer = nullptr;
     HFONT font = nullptr;
     bool ownedByWindow = false;
+    RECT topCardRect{};
+    RECT viewerCardRect{};
     std::wstring folderPath;
     std::wstring filePath;
     std::wstring selectedFileName;
@@ -58,6 +63,11 @@ struct StreamInState {
 };
 
 HMODULE g_richEditModule = nullptr;
+
+bool g_isWindows7 = []() -> bool {
+    OSVERSIONINFOW vi = { sizeof(vi) };
+    return GetVersionExW(&vi) && vi.dwMajorVersion == 6 && vi.dwMinorVersion == 1;
+}();
 
 DWORD CALLBACK streamInCallback(DWORD_PTR cookie, LPBYTE buffer, LONG cb, LONG* pcb) {
     auto* state = reinterpret_cast<StreamInState*>(cookie);
@@ -200,10 +210,69 @@ void selectFileName(PhoneDirectoryState* st, const std::wstring& fileName, bool 
     }
 }
 
+void applyViewerPageRect(PhoneDirectoryState* st) {
+    if (!st || !st->viewer) return;
+    RECT client{};
+    GetClientRect(st->viewer, &client);
+    const int scale = static_cast<int>(search::dpi_scale_factor(st->viewer) * 1.0f);
+    const int clientW = static_cast<int>(client.right - client.left);
+    const int clientH = static_cast<int>(client.bottom - client.top);
+    const int pageW = std::min(clientW, VIEWER_PAGE_MAX_W * scale);
+    const int left = std::max(0, (clientW - pageW) / 2);
+    RECT formatRect{left, 0, left + pageW, clientH};
+    SendMessageW(st->viewer, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&formatRect));
+}
+
+bool isRectVisible(const RECT& rc) {
+    return rc.right > rc.left && rc.bottom > rc.top;
+}
+
+void fillRoundRect(HDC dc, const RECT& rc, int radius, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    HBRUSH oldBrush = reinterpret_cast<HBRUSH>(SelectObject(dc, brush));
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HPEN oldPen = reinterpret_cast<HPEN>(SelectObject(dc, pen));
+    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+void strokeRoundRect(HDC dc, const RECT& rc, int radius, COLORREF color) {
+    HBRUSH oldBrush = reinterpret_cast<HBRUSH>(SelectObject(dc, GetStockObject(NULL_BRUSH)));
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HPEN oldPen = reinterpret_cast<HPEN>(SelectObject(dc, pen));
+    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    DeleteObject(pen);
+}
+
+void drawPhoneDirectoryChrome(HWND hwnd, PhoneDirectoryState* st, HDC dc) {
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    HBRUSH bg = CreateSolidBrush(kPhoneBg);
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+
+    const int scale = std::max(1, static_cast<int>(search::dpi_scale_factor(hwnd) * 1.0f));
+    const int radius = 8 * scale;
+    if (st && isRectVisible(st->viewerCardRect)) {
+        fillRoundRect(dc, st->viewerCardRect, radius, kPhonePanel);
+        strokeRoundRect(dc, st->viewerCardRect, radius, kPhoneBorder);
+    }
+    if (st && isRectVisible(st->topCardRect)) {
+        fillRoundRect(dc, st->topCardRect, radius, kPhonePanel);
+        strokeRoundRect(dc, st->topCardRect, radius, kPhoneSubtleBorder);
+    }
+}
+
 void setViewerPlainText(PhoneDirectoryState* st, const std::wstring& text) {
     if (!st || !st->viewer) return;
     SendMessageW(st->viewer, WM_SETREDRAW, FALSE, 0);
     SetWindowTextW(st->viewer, text.c_str());
+    applyViewerPageRect(st);
     SendMessageW(st->viewer, EM_SETSEL, 0, 0);
     SendMessageW(st->viewer, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(st->viewer, nullptr, TRUE);
@@ -265,6 +334,7 @@ bool streamRtf(PhoneDirectoryState* st, const std::vector<BYTE>& bytes) {
     SendMessageW(st->viewer, EM_SETSEL, 0, -1);
     SendMessageW(st->viewer, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
     const LRESULT result = SendMessageW(st->viewer, EM_STREAMIN, SF_RTF, reinterpret_cast<LPARAM>(&es));
+    applyViewerPageRect(st);
     SendMessageW(st->viewer, EM_SETSEL, 0, 0);
     SendMessageW(st->viewer, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(st->viewer, nullptr, TRUE);
@@ -282,9 +352,7 @@ void loadPhoneFile(PhoneDirectoryState* st) {
         return;
     }
 
-    if (streamRtf(st, bytes)) {
-        return;
-    }
+    if (streamRtf(st, bytes)) return;
 
     setViewerPlainText(st, bytesToWideText(bytes));
 }
@@ -354,12 +422,33 @@ void focusFindEdit(PhoneDirectoryState* st, bool selectAll = true) {
     }
 }
 
-void scheduleSearchTextSelect(HWND hwnd) {
-    KillTimer(hwnd, IDT_SELECT_SEARCH_TEXT);
-    SetTimer(hwnd, IDT_SELECT_SEARCH_TEXT, AUTO_SELECT_DELAY_MS, nullptr);
+void forceViewerRepaint(HWND viewer, bool includeFrame) {
+    if (!viewer) return;
+    UINT flags = RDW_INVALIDATE | RDW_ALLCHILDREN;
+    if (includeFrame) flags |= RDW_FRAME;
+    RedrawWindow(viewer, nullptr, nullptr, flags);
 }
 
-bool findText(PhoneDirectoryState* st, bool fromStart, bool beepOnMissing, bool delayedSelect) {
+void scrollViewerToMatch(PhoneDirectoryState* st, LONG charPos) {
+    if (!st || !st->viewer || charPos < 0) return;
+    const LONG matchLine = static_cast<LONG>(
+        SendMessageW(st->viewer, EM_EXLINEFROMCHAR, 0, static_cast<LPARAM>(charPos)));
+    if (matchLine < 0) return;
+
+    RECT rc{};
+    GetClientRect(st->viewer, &rc);
+    const int scale = std::max(1, static_cast<int>(search::dpi_scale_factor(st->viewer) * 1.0f));
+    const int lineH = std::max(12 * scale, 18 * scale);
+    const int visibleLines = std::max(3, static_cast<int>(rc.bottom - rc.top) / lineH);
+    const LONG targetFirstLine = std::max<LONG>(0, matchLine - std::max<LONG>(1, visibleLines / 3));
+    const LONG currentFirstLine = static_cast<LONG>(SendMessageW(st->viewer, EM_GETFIRSTVISIBLELINE, 0, 0));
+    const LONG delta = targetFirstLine - currentFirstLine;
+    if (delta != 0) {
+        SendMessageW(st->viewer, EM_LINESCROLL, 0, static_cast<LPARAM>(delta));
+    }
+}
+
+bool findText(PhoneDirectoryState* st, bool fromStart, bool beepOnMissing) {
     if (!st || !st->viewer || !st->findEdit) return false;
     const std::wstring keyword = trimWide(windowText(st->findEdit));
     if (keyword.empty()) {
@@ -384,41 +473,30 @@ bool findText(PhoneDirectoryState* st, bool fromStart, bool beepOnMissing, bool 
     }
 
     if (pos >= 0) {
+        scrollViewerToMatch(st, ft.chrgText.cpMin);
         SendMessageW(st->viewer, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&ft.chrgText));
-        SendMessageW(st->viewer, EM_SCROLLCARET, 0, 0);
+        forceViewerRepaint(st->viewer, false);
         focusFindEdit(st, false);
-        if (delayedSelect) {
-            scheduleSearchTextSelect(GetParent(st->findEdit));
-        }
         return true;
     }
 
     if (beepOnMissing) MessageBeep(MB_ICONINFORMATION);
     focusFindEdit(st, false);
-    if (delayedSelect) {
-        scheduleSearchTextSelect(GetParent(st->findEdit));
-    }
     return false;
 }
 
 bool findNext(PhoneDirectoryState* st) {
-    return findText(st, false, true, true);
+    return findText(st, false, true);
 }
 
 void runAutoSearch(HWND hwnd, PhoneDirectoryState* st) {
     KillTimer(hwnd, IDT_AUTO_SEARCH);
-    KillTimer(hwnd, IDT_SELECT_SEARCH_TEXT);
     if (!st) return;
     if (!trimWide(windowText(st->findEdit)).empty()) {
-        findText(st, true, false, true);
+        findText(st, true, false);
     } else {
         focusFindEdit(st, false);
     }
-}
-
-void selectSearchText(HWND hwnd, PhoneDirectoryState* st) {
-    KillTimer(hwnd, IDT_SELECT_SEARCH_TEXT);
-    focusFindEdit(st, true);
 }
 
 PhoneDirectoryState* stateFrom(HWND hwnd) {
@@ -429,30 +507,61 @@ void layoutPhoneDirectory(HWND hwnd, PhoneDirectoryState* st) {
     if (!st) return;
     RECT rc{};
     GetClientRect(hwnd, &rc);
-    const int scale = static_cast<int>(search::dpi_scale_factor(hwnd) * 1.0f);
-    const int margin = 10 * scale;
-    const int topH = 42 * scale;
-    const int buttonW = 68 * scale;
-    const int uploadW = 68 * scale;
-    const int gap = 8 * scale;
+    const int scale = std::max(1, static_cast<int>(search::dpi_scale_factor(hwnd) * 1.0f));
+    const int margin = 14 * scale;
+    const int topH = 76 * scale;
+    const int buttonW = 56 * scale;
+    const int uploadW = 56 * scale;
+    const int controlGap = 10 * scale;
+    const int rowGap = 8 * scale;
     const int rowH = 28 * scale;
+    const int cardPadX = 12 * scale;
+    const int cardPadY = 10 * scale;
+    const int viewerPad = 10 * scale;
+    const int topMaxW = 420 * scale;
+    const int topMinW = 300 * scale;
+    const int sideGap = 8 * scale;
+    const int comboMinW = 120 * scale;
     const int contentW = static_cast<int>(rc.right - rc.left) - margin * 2;
-    const int controlsW = uploadW + buttonW + gap * 3;
-    const int availableW = std::max(260 * scale, contentW - controlsW);
-    const int comboW = std::min(std::max(180 * scale, availableW / 3), 320 * scale);
-    const int findW = std::max(160 * scale, availableW - comboW);
+    const int topW = std::max(0, std::min(contentW, topMaxW));
+    const int topLeft = std::max(margin, static_cast<int>(rc.right) - margin - topW);
+    st->topCardRect = {topLeft, margin, topLeft + topW, margin + topH};
+    if (topW >= topMinW && topLeft - sideGap > margin + 260 * scale) {
+        st->viewerCardRect = {margin, margin, topLeft - sideGap, rc.bottom - margin};
+    } else {
+        st->viewerCardRect = {margin, margin + topH + sideGap, rc.right - margin, rc.bottom - margin};
+    }
 
-    int x = margin;
-    MoveWindow(st->fileCombo, x, margin, comboW, 300 * scale, TRUE);
-    x += comboW + gap;
-    MoveWindow(st->uploadButton, x, margin, uploadW, rowH, TRUE);
-    x += uploadW + gap;
-    MoveWindow(st->reloadButton, x, margin, buttonW, rowH, TRUE);
-    x += buttonW + gap;
-    MoveWindow(st->findEdit, x, margin, findW, rowH, TRUE);
+    const int innerW = std::max(0, topW - cardPadX * 2);
+    const int controlX = st->topCardRect.left + cardPadX;
+    const int searchY = st->topCardRect.top + cardPadY;
+    const int docY = searchY + rowH + rowGap;
+    const int searchW = std::max(0, innerW);
+    int comboW = std::max(comboMinW, innerW - uploadW - buttonW - controlGap * 2);
+    if (innerW < comboW + uploadW + buttonW + controlGap * 2) {
+        comboW = std::max(0, innerW - uploadW - buttonW - controlGap * 2);
+    }
 
-    MoveWindow(st->viewer, margin, margin + topH,
-               rc.right - margin * 2, rc.bottom - margin * 2 - topH, TRUE);
+    MoveWindow(st->findEdit, controlX, searchY, searchW, rowH, TRUE);
+
+    int x = controlX;
+    MoveWindow(st->fileCombo, x, docY, comboW, 300 * scale, TRUE);
+    x += comboW + controlGap;
+    MoveWindow(st->uploadButton, x, docY, uploadW, rowH, TRUE);
+    x += uploadW + controlGap;
+    MoveWindow(st->reloadButton, x, docY, buttonW, rowH, TRUE);
+
+    const int viewerW = std::max(0, static_cast<int>(st->viewerCardRect.right - st->viewerCardRect.left) - viewerPad * 2);
+    const int viewerH = std::max(0, static_cast<int>(st->viewerCardRect.bottom - st->viewerCardRect.top) - viewerPad * 2);
+    MoveWindow(st->viewer, st->viewerCardRect.left + viewerPad, st->viewerCardRect.top + viewerPad,
+               viewerW, viewerH, TRUE);
+    SetWindowPos(st->viewer, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetWindowPos(st->fileCombo, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetWindowPos(st->uploadButton, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetWindowPos(st->reloadButton, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetWindowPos(st->findEdit, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    applyViewerPageRect(st);
+    InvalidateRect(hwnd, nullptr, TRUE);
 }
 
 void applyPhoneDirectoryFont(HWND hwnd, PhoneDirectoryState* st, HFONT font) {
@@ -480,6 +589,24 @@ LRESULT CALLBACK findEditSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 LRESULT CALLBACK viewerSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                 UINT_PTR, DWORD_PTR refData) {
     auto* st = reinterpret_cast<PhoneDirectoryState*>(refData);
+    if (msg == WM_ERASEBKGND) {
+        return TRUE;
+    }
+    if (g_isWindows7 && (msg == WM_VSCROLL || msg == WM_HSCROLL ||
+        msg == WM_MOUSEHWHEEL)) {
+        const LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return result;
+    }
+    if (g_isWindows7 && msg == WM_MOUSEWHEEL) {
+        const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        const int lines = delta / WHEEL_DELTA * 3;
+        const WPARAM cmd = (delta > 0) ? SB_LINEUP : SB_LINEDOWN;
+        for (int i = 0; i < abs(lines); ++i)
+            SendMessageW(hwnd, EM_SCROLL, cmd, 0);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
     if (msg == WM_SETFOCUS && st && st->findEdit) {
         PostMessageW(GetParent(hwnd), WM_PHONE_FOCUS_SEARCH, 0, 0);
     }
@@ -527,10 +654,11 @@ LRESULT CALLBACK phoneDirectoryWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         st->findEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                        0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_FIND_EDIT),
                                        st->ctx.instance, nullptr);
-        SendMessageW(st->findEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"输入姓名、科室或电话"));
+        SendMessageW(st->findEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"输入科室或电话查询"));
         st->reloadButton = search::create_button(hwnd, IDC_RELOAD, L"刷新", 0, 0, 0, 0);
-        st->viewer = CreateWindowExW(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
+        st->viewer = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
                                      WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+                                     WS_CLIPSIBLINGS |
                                      ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL |
                                      ES_READONLY | ES_NOHIDESEL,
                                      0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_VIEWER),
@@ -555,6 +683,10 @@ LRESULT CALLBACK phoneDirectoryWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     case WM_SIZE:
         layoutPhoneDirectory(hwnd, stateFrom(hwnd));
         return 0;
+    case WM_ERASEBKGND: {
+        drawPhoneDirectoryChrome(hwnd, stateFrom(hwnd), reinterpret_cast<HDC>(wp));
+        return TRUE;
+    }
     case WM_PHONE_FOCUS_SEARCH:
         focusFindEdit(stateFrom(hwnd));
         return 0;
@@ -573,10 +705,6 @@ LRESULT CALLBACK phoneDirectoryWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     case WM_TIMER:
         if (wp == IDT_AUTO_SEARCH) {
             runAutoSearch(hwnd, stateFrom(hwnd));
-            return 0;
-        }
-        if (wp == IDT_SELECT_SEARCH_TEXT) {
-            selectSearchText(hwnd, stateFrom(hwnd));
             return 0;
         }
         break;
@@ -645,7 +773,6 @@ LRESULT CALLBACK phoneDirectoryWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     case WM_DESTROY: {
         auto* st = stateFrom(hwnd);
         KillTimer(hwnd, IDT_AUTO_SEARCH);
-        KillTimer(hwnd, IDT_SELECT_SEARCH_TEXT);
         if (st) {
             if (st->findEdit) RemoveWindowSubclass(st->findEdit, findEditSubclass, 1);
             if (st->viewer) RemoveWindowSubclass(st->viewer, viewerSubclass, 1);
@@ -680,7 +807,7 @@ HWND create_phone_directory_module(const ModuleContext& ctx) {
     mcs.y = CW_USEDEFAULT;
     mcs.cx = 860;
     mcs.cy = 620;
-    mcs.style = WS_VISIBLE | WS_OVERLAPPEDWINDOW;
+    mcs.style = WS_VISIBLE | WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
     mcs.lParam = reinterpret_cast<LPARAM>(st);
 
     HWND child = reinterpret_cast<HWND>(SendMessageW(ctx.mdiClient, WM_MDICREATE, 0, reinterpret_cast<LPARAM>(&mcs)));
