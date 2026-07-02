@@ -1036,8 +1036,8 @@ std::string dateOnly(const std::string& value) {
 }
 
 std::string referenceRange(const search::ResultRow& row) {
-    const auto lower = search::trim(row.upbound);
-    const auto upper = search::trim(row.downbound);
+    const auto lower = search::trim(row.downbound);
+    const auto upper = search::trim(row.upbound);
     if (lower.empty()) {
         return upper;
     }

@@ -388,7 +388,7 @@ void resizeLayout(HWND hwnd, EmergencyStatisticsState* st) {
     const int h = rc.bottom - rc.top;
     const int pad = S(hwnd, 10);
     const int topH = S(hwnd, 42);
-    const int summaryH = S(hwnd, 62);
+    const int summaryH = S(hwnd, 76);
     const int statusX = S(hwnd, 864);
     const int statusW = (std::max)(S(hwnd, 120), w - statusX - pad);
     MoveWindow(st->status, statusX, S(hwnd, 12), statusW, S(hwnd, 24), TRUE);

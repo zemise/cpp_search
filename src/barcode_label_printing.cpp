@@ -15,12 +15,17 @@ namespace {
 constexpr const wchar_t* DEFAULT_BARCODE_PRINTER_NAME = L"Xprinter XP-360B #2";
 
 #if defined(LIS_HAS_LABELPRINT)
+constexpr int ZEBRA_BARCODE_TEXT_WIDTH = 290;
+
 labelprint::MedicalLabelLayout zebraMedicalLabelLayout() {
     labelprint::MedicalLabelLayout layout;
     const auto& zebra = labelprint::PrinterProfiles::zebra_zd888();
     layout.settings.darkness = zebra.darkness;
     layout.settings.printSpeed = zebra.speed;
     layout.settings.quantity = 1;
+    layout.testItem.pos.x = layout.barcode.pos.x;
+    layout.testItem.maxWidth = ZEBRA_BARCODE_TEXT_WIDTH;
+    layout.testItem.align = labelprint::MedicalLabelTextAlign::Center;
     return layout;
 }
 
