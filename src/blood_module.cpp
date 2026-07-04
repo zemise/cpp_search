@@ -72,6 +72,7 @@ constexpr int IDC_LIS_QUERY = 6302;
 constexpr int IDC_LIS_REPORTS = 6303;
 constexpr int IDC_LIS_RESULTS = 6304;
 constexpr int IDC_LIS_QUERY_NAME = 6305;
+constexpr int IDC_LIS_QUERY_ID = 6306;
 
 enum LisReportColumn {
     LisReportSampleNo = 0,
@@ -82,6 +83,12 @@ enum LisReportColumn {
     LisReportReviewer = 5,
     LisReportRoomCode = 6,
     LisReportMachineCode = 7,
+};
+
+enum class LisQueryMode {
+    PatientNo,
+    Name,
+    SocialNo,
 };
 
 constexpr COLORREF COLOR_PAGE_BG = RGB(0xE8, 0xF8, 0xFF);
@@ -184,6 +191,7 @@ struct LisState {
     HWND days = nullptr;
     HWND queryButton = nullptr;
     HWND queryNameButton = nullptr;
+    HWND queryIdButton = nullptr;
     HWND labelPatientNo = nullptr;
     HWND labelPatientName = nullptr;
     HWND labelPatientAge = nullptr;
@@ -245,9 +253,10 @@ void layoutLisWindow(HWND hwnd, LisState* st);
 struct LisQueryResult {
     int generation = 0;
     bool ok = false;
-    bool byName = false;
+    LisQueryMode mode = LisQueryMode::PatientNo;
     bool phoneFiltered = false;
     bool phoneLookupAttempted = false;
+    size_t socialNoPatientCount = 0;
     std::vector<search::ReportRow> reports;
     std::string error;
 };
@@ -1506,19 +1515,24 @@ void setLisIdentityHint(LisState* st, const wchar_t* text, COLORREF color) {
     InvalidateRect(st->identityHint, nullptr, TRUE);
 }
 
-void runLisQuery(LisState* st, bool byName = false) {
-    setLisIdentityEnabled(st, !byName);
+void runLisQuery(LisState* st, LisQueryMode mode = LisQueryMode::PatientNo) {
+    const bool byName = mode == LisQueryMode::Name;
+    const bool bySocialNo = mode == LisQueryMode::SocialNo;
+    setLisIdentityEnabled(st, mode == LisQueryMode::PatientNo);
 
     const auto conn = lisConnectionString(st);
     if (conn.empty()) {
+        setLisIdentityEnabled(st, TRUE);
         MessageBoxW(nullptr, L"请先在“系统设置”中填写数据库连接信息。", L"缺少数据库设置", MB_ICONWARNING);
         return;
     }
     if (!byName && search::trim(st->patient_no).empty()) {
+        setLisIdentityEnabled(st, TRUE);
         MessageBoxW(nullptr, L"当前输血申请没有病人号，无法查询检验结果。", L"缺少病人号", MB_ICONWARNING);
         return;
     }
     if (byName && search::trim(st->patient_name).empty()) {
+        setLisIdentityEnabled(st, TRUE);
         MessageBoxW(nullptr, L"当前输血申请没有姓名，无法按名字查询检验结果。", L"缺少姓名", MB_ICONWARNING);
         return;
     }
@@ -1555,6 +1569,18 @@ void runLisQuery(LisState* st, bool byName = false) {
                 filters.patient_phone = phone;
             }
         }
+    } else if (bySocialNo) {
+        std::string idError;
+        if (!search::query_inpatient_nos_by_social_no_from_reg_no(conn, st->patient_no, filters.patient_nos, idError)) {
+            setLisIdentityEnabled(st, TRUE);
+            MessageBoxW(nullptr, search::utf8_to_wide(idError).c_str(), L"按身份证查询失败", MB_ICONERROR);
+            return;
+        }
+        if (filters.patient_nos.empty()) {
+            setLisIdentityEnabled(st, TRUE);
+            MessageBoxW(nullptr, L"未能从住院病人信息表中找到当前病人号对应的身份证号，无法按身份证查询。", L"未找到身份证", MB_ICONWARNING);
+            return;
+        }
     } else {
         filters.patient_no = st->patient_no;
     }
@@ -1567,7 +1593,10 @@ void runLisQuery(LisState* st, bool byName = false) {
     ListView_DeleteAllItems(st->reports);
     ListView_DeleteAllItems(st->results);
     setLisSummaryLoading(st);
-    if (byName && !search::trim(filters.patient_phone).empty()) {
+    if (bySocialNo) {
+        setLisIdentityHint(st, L"已按身份证匹配住院号", COLOR_TRUSTED);
+        SetWindowTextW(st->status, L"正在按身份证查询检验结果...");
+    } else if (byName && !search::trim(filters.patient_phone).empty()) {
         setLisIdentityHint(st, L"已按姓名 + 电话匹配", COLOR_TRUSTED);
         SetWindowTextW(st->status, L"正在按姓名和电话查询检验结果...");
     } else if (byName && !search::trim(st->patient_no).empty()) {
@@ -1580,14 +1609,17 @@ void runLisQuery(LisState* st, bool byName = false) {
 
     EnableWindow(st->queryButton, FALSE);
     EnableWindow(st->queryNameButton, FALSE);
+    EnableWindow(st->queryIdButton, FALSE);
     const HWND hwnd = GetParent(st->reports);
     const int generation = ++st->queryGeneration;
-    std::thread([hwnd, filters, byName, phoneLookupAttempted, generation]() {
+    const size_t socialNoPatientCount = filters.patient_nos.size();
+    std::thread([hwnd, filters, mode, byName, phoneLookupAttempted, socialNoPatientCount, generation]() {
         auto* result = new LisQueryResult;
         result->generation = generation;
-        result->byName = byName;
+        result->mode = mode;
         result->phoneFiltered = byName && !search::trim(filters.patient_phone).empty();
         result->phoneLookupAttempted = phoneLookupAttempted;
+        result->socialNoPatientCount = socialNoPatientCount;
         result->ok = search::query_blood_lis_reports(filters, result->reports, result->error);
         if (!PostMessageW(hwnd, WM_LIS_QUERY_DONE, 0, reinterpret_cast<LPARAM>(result))) {
             delete result;
@@ -1607,6 +1639,7 @@ void finishLisQuery(HWND hwnd, LisState* st, std::unique_ptr<LisQueryResult> res
     if (!st || result->generation != st->queryGeneration) return;
     EnableWindow(st->queryButton, TRUE);
     EnableWindow(st->queryNameButton, TRUE);
+    EnableWindow(st->queryIdButton, TRUE);
     if (!result->ok) {
         SetWindowTextW(st->status, L"查询失败。");
         MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), L"查询检验结果失败", MB_ICONERROR);
@@ -1627,11 +1660,18 @@ void finishLisQuery(HWND hwnd, LisState* st, std::unique_ptr<LisQueryResult> res
     countLisReportInstrumentMatches(st, bloodTypeCount, cbcCount);
     wchar_t msg[192]{};
     const wchar_t* prefix = L"查询完成";
-    if (result->byName && result->phoneFiltered) {
+    if (result->mode == LisQueryMode::SocialNo) {
+        std::swprintf(msg, 192, L"按身份证查询完成（匹配 %zu 个住院号），共 %zu 条组合项目。血型 %zu，血常规 %zu。",
+                      result->socialNoPatientCount, st->report_rows.size(), bloodTypeCount, cbcCount);
+        SetWindowTextW(st->status, msg);
+        selectLisReport(st, st->report_rows.empty() ? -1 : 0);
+        return;
+    }
+    if (result->mode == LisQueryMode::Name && result->phoneFiltered) {
         prefix = L"按姓名+电话查询完成";
-    } else if (result->byName && result->phoneLookupAttempted) {
+    } else if (result->mode == LisQueryMode::Name && result->phoneLookupAttempted) {
         prefix = L"按名字查询完成（未获取到电话）";
-    } else if (result->byName) {
+    } else if (result->mode == LisQueryMode::Name) {
         prefix = L"按名字查询完成";
     }
     std::swprintf(msg, 192, L"%ls，共 %zu 条组合项目。血型 %zu，血常规 %zu。",
@@ -1743,6 +1783,8 @@ void layoutLisWindow(HWND hwnd, LisState* st) {
     MoveWindow(st->queryButton, contentX, sideY, buttonW, buttonH, TRUE);
     sideY += S(38);
     MoveWindow(st->queryNameButton, contentX, sideY, buttonW, buttonH, TRUE);
+    sideY += S(38);
+    MoveWindow(st->queryIdButton, contentX, sideY, buttonW, buttonH, TRUE);
     sideY += S(42);
 
     const int labelTop = margin;
@@ -1819,6 +1861,8 @@ LRESULT CALLBACK lisWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                               0, 0, 0, 0, hwnd, win32_control_id(IDC_LIS_QUERY), GetModuleHandleW(nullptr), nullptr);
             st->queryNameButton = CreateWindowExW(0, L"BUTTON", L"按名字查询", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                                   0, 0, 0, 0, hwnd, win32_control_id(IDC_LIS_QUERY_NAME), GetModuleHandleW(nullptr), nullptr);
+            st->queryIdButton = CreateWindowExW(0, L"BUTTON", L"按身份证查询", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                                0, 0, 0, 0, hwnd, win32_control_id(IDC_LIS_QUERY_ID), GetModuleHandleW(nullptr), nullptr);
             setLisSummaryLoading(st);
 
             st->reports = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -1898,7 +1942,11 @@ LRESULT CALLBACK lisWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (st && LOWORD(wp) == IDC_LIS_QUERY_NAME) {
-                runLisQuery(st, true);
+                runLisQuery(st, LisQueryMode::Name);
+                return 0;
+            }
+            if (st && LOWORD(wp) == IDC_LIS_QUERY_ID) {
+                runLisQuery(st, LisQueryMode::SocialNo);
                 return 0;
             }
             break;

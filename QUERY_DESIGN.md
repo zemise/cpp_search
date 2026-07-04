@@ -198,6 +198,8 @@ ApplyCompositionApplyNumApplyUnit;
 
 按名字查询用于处理输血申请病人号不足或现场需要按姓名补查的场景，但姓名可能重名。当前会先用当前输血申请病人号按 `LS_AS_REPORT.REG_NO` 查询最近一条非空 `PAT_PHONE`，取到电话后，报告列表和摘要查询都会在 `NAME LIKE` 外额外下推 `LS_AS_REPORT.PAT_PHONE = 当前电话`，使列表和摘要使用同一身份约束；如果当前病人号未能取到电话，则保留原姓名查询。弹窗会在检验摘要区下方显示身份匹配可信度提示：病人号或姓名+电话匹配为绿色提示，仅姓名匹配为橙色提示。
 
+按身份证查询用于处理同一病人多次住院号变化的场景。弹窗先使用当前输血申请病人号匹配 `ZY_INPATIENT.INPATIENT_NO`，读取该住院病人的 `SOCIAL_NO`，再查询同一 `SOCIAL_NO` 下所有非空 `INPATIENT_NO`，报告列表和摘要都用这些住院号下推 `LS_AS_REPORT.REG_NO IN (...)`。如果当前病人号在 `ZY_INPATIENT` 中未找到身份证号，则不发起宽泛查询并提示用户。身份证号仅用于数据库侧匹配，不在界面显示。
+
 报告列表支持通过系统设置 `[LisSummary] BloodLisExcludeMachines` 排除不想展示的检验科室/仪器，过滤只作用于输血弹窗报告列表，不影响右侧血型/血常规摘要。格式为 `ROOM:;ROOM:MACH1,MACH2;ROOM:MACH`，默认 `3:;71:;8:8004`，表示排除 `ROOM_CODE=3`、`ROOM_CODE=71` 的全部仪器，并额外排除 `ROOM_CODE=8 AND MACH_CODE=8004`。配置为空或无有效片段时不追加排除条件；用户在系统设置中清空该项后会保留空值，不会被默认值覆盖。
 
 报告列表还会复用 `[LisSummary] BloodTypeMachines / CbcMachines` 判断当前行是否属于血型仪器或血常规仪器。查询完成状态栏会显示当前列表命中的血型/血常规行数，便于核对配置是否匹配实际 `ROOM_CODE:MACH_CODE`；列表行本身保持系统默认绘制，不额外设置背景色。
@@ -438,7 +440,7 @@ HIV 统计表导出：
 - `打印条码`：打印当前右键行。
 - `打印勾选条码`：按当前列表顺序打印所有勾选行；如果中途失败，会停止后续打印并提示已发送数量和失败记录。
 
-打印会把对应行字段填入外部 `LabelPrint` 项目的 `MedicalLabelData`，再发送 RAW 打印任务。打印机名读取 `ClientConfig.ini` 的 `[RegularReport] BarcodePrinterName`，默认值为 `Xprinter XP-360B #2`，并以宽字符形式传给 LabelPrint，避免中文打印机名经过 ANSI 转换后失效。LabelPrint 内部会读取 Windows 打印机元数据，自动选择 XP-360B 的 TSPL 位图路径或 Zebra ZD888 的 ZPL 路径；无法识别时按 XP-360B 兼容路径兜底。检测到 Zebra/ZD888t 时，本项目复用 LabelPrint Zebra 测试打印的默认布局并清空 `E:CSONG.TTF` fallback，只用 `E:SIMSUN.TTF` 输出中文，避免双字体叠印导致文字显示不全；Zebra 路径下 `组合项目` 以条码水平区域为基准居中。打印数据中的样本号、条码号、姓名、标本、开单日期、科室代码、病人号来自右侧报告行；条码上的组合项目取自右侧报告行的 `检验仪器` 列内容，不再为了打印条码额外查询中间项目明细；开单日期按 `yyyy/M/d` 格式输出。
+打印会把对应行字段填入外部 `LabelPrint` 项目的 `MedicalLabelData`，再通过共享条码打印 helper 发送 RAW 打印任务。打印机名读取 `ClientConfig.ini` 的 `[RegularReport] BarcodePrinterName`，默认值为 `Xprinter XP-360B #2`，并以宽字符形式传给打印链路，避免中文打印机名经过 ANSI 转换后失效。非 Zebra 打印机继续交给 LabelPrint 读取 Windows 打印机元数据并自动选择 XP-360B TSPL、Godex EZPL 等路径；无法识别时按 XP-360B 兼容路径兜底。检测到 Zebra/ZD888t 时，本项目复用 LabelPrint Zebra 测试打印的默认布局，并读取 `[RegularReport] ZebraChineseFont` 选择 `E:SIMSUN.TTF` 或 `E:CSONG.TTF` 输出中文，默认 `E:SIMSUN.TTF`；仍清空 fallback，避免双字体叠印导致文字显示不全；Zebra 路径下 `组合项目` 以条码水平区域为基准居中。打印数据中的样本号、条码号、姓名、标本、开单日期、科室代码、病人号来自右侧报告行；条码上的组合项目取自右侧报告行的 `检验仪器` 列内容，不再为了打印条码额外查询中间项目明细；开单日期按 `yyyy/M/d` 格式输出。
 
 如果保存的打印机名因为 Windows 重命名、换电脑或驱动重装而失效，右键打印会提示失败原因和当前打印机名。用户需要到 `系统设置` 页重新选择常规报告条码打印机并保存。
 

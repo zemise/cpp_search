@@ -1,5 +1,12 @@
 # Changelog
 
+## v2026.07.04
+
+- **输血 LIS 身份证查询**：`输血结果查询 -> 查询检验结果` 弹窗新增 `按身份证查询`，通过 `ZY_INPATIENT.INPATIENT_NO` 找到当前病人的 `SOCIAL_NO`，再匹配同一身份证下的所有住院号查询 `LS_AS_REPORT.REG_NO`，用于补查同一病人不同住院号下的检验结果。
+- **门诊查询模块**：工具菜单和自定义工具栏在 `常用电话` 前新增 `门诊查询`，页面顶部采用两行筛选布局并按当前系统字体测量标签宽度，提供收费时间起止、院区、默认不勾选的 `包含非检验科`、门诊号、姓名、身份证和查询按钮，勾选 `包含非检验科` 后不再按院区限定 `ZXKS`，门诊号、姓名和身份证输入框均加宽并支持回车直接查询；门诊号筛选直接对应 `YJ_MZSQ.BLH`，按末尾匹配查询，便于输入短尾号定位完整门诊号，输入门诊号时若前 8 位可推断 `YYYYMMDD`，则按该日期查，否则只查第二个收费时间控件所在日期；下方列表展示门诊号、发票号、卡号、姓名、性别、年龄、项目名称、申请科室、单价、总数、单位、金额、收费时间、条码号、标本类型和条码打印时间，并支持右键复制当前单元格；查询层固定读取 `YJ_MZSQ.BLH / FPH / SQNR / SQKS / DJ / SL / DW / JE / SFRQ / TXM / BBMC / TXMDYSJ / ZXKS`，身份证筛选对应 `YY_BRXX.SFZH`，申请科室按 `YJ_MZSQ.SQKS -> JC_DEPT_PROPERTY.DEPT_ID -> NAME` 转换为名称，并通过 `YJ_MZSQ.BRXXID = YY_BRXX.BRXXID` 读取 `SFZH / BRXM / XB / CSRQ`；有条码号的记录按 `TXM` 聚合同条码多行 `SQNR`，项目名称用 `/` 去重拼接；`FPH` 为空时显示 `0`，卡号显示 `SFZH`，`XB` 按 `1/2` 显示男女，`CSRQ` 转换为年龄，`TXM` 为空时条码号显示 `未生成` 并以黄色整行提示，院区按 `ZXKS=102/401` 映射老院/新院，`全部` 默认仅汇总这两个院区，只读读取门诊收费明细。
+- **Zebra 中文字体配置**：系统设置页的常规报告打印区域新增 `Zebra 字体` 下拉框，保存到 `[RegularReport] ZebraChineseFont`；仅 Zebra/ZD888t 路径生效，可在 `E:SIMSUN.TTF` 与 `E:CSONG.TTF` 间选择单一中文字体，仍禁用 fallback 叠印。
+- 版本号 v2026.07.04。
+
 ## v2026.07.02
 
 - **输血 LIS 参考范围修复**：`输血结果查询 -> 查询检验结果` 弹窗右侧详情列表的 `参考范围` 列恢复为下限在前、上限在后显示，格式为 `下限~上限`，避免 `~` 前后数值颠倒。
@@ -17,7 +24,7 @@
 - **HIV 汇总显示优化**：上方样本来源分类表将 `合计` 调整为第一行显示，并用浅蓝背景突出；DOCX 统计表导出仍保持原模板占位符顺序。
 - **HIV 明细联动常规报告**：下方明细列表支持双击行跳转到 `常规报告` 页面，复用现有 `RegularReportOpenTarget + WM_REGULAR_OPEN_REPORT` 机制，并携带报告号、样本号、检验日期、仪器和检验室代码定位目标报告。
 - **LabelPrint 依赖更新**：打包脚本、GitHub Actions 和 Windows 打包文档默认引用 LabelPrint `v1.2.10` Win7 兼容 release 包。
-- **Zebra ZD888t 打印适配**：本项目检测到 Zebra/ZD888t 时复用 LabelPrint Zebra 测试打印的默认排版布局，并仅使用 `E:SIMSUN.TTF` 输出中文，避免 `E:CSONG.TTF` fallback 叠印造成文字显示不全；其它打印机仍走 LabelPrint 自动识别路径。
+- **Zebra ZD888t 打印适配**：本项目检测到 Zebra/ZD888t 时复用 LabelPrint Zebra 测试打印的默认排版布局，并默认使用单一 `E:SIMSUN.TTF` 输出中文、清空 `E:CSONG.TTF` fallback，避免双字体叠印造成文字显示不全；其它打印机仍走 LabelPrint 自动识别路径。
 - 版本号 v2026.06.30。
 
 ## v2026.06.25

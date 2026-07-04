@@ -1228,7 +1228,7 @@ void createLeftPanel(HWND parent, RegularReportState* st) {
     SetPropW(st->urgentLabel, L"RegularEmergencyLabel", reinterpret_cast<HANDLE>(1));
     st->urgentEdit = edt(L"", nrex, rowY(4) - 2, nrew, eh);
     lbl(L"条形码", lx, rowY(5), lw); st->barcodeEdit = edt(L"", ix, rowY(5) - 2, fiw, eh, ES_CENTER);
-    lbl(L"住院号:", lx, rowY(6), lw); st->regNoEdit = edt(L"", ix, rowY(6) - 2, fiw, eh);
+    lbl(L"病人号", lx, rowY(6), lw); st->regNoEdit = edt(L"", ix, rowY(6) - 2, fiw, eh);
 
     // 病人信息
     gy += sH + gg;

@@ -30,6 +30,19 @@ std::string sql_escape(std::string value) {
     return value;
 }
 
+std::string sql_string_list(const std::vector<std::string>& values) {
+    std::ostringstream out;
+    bool first = true;
+    for (const auto& value : values) {
+        const std::string trimmed = trim(value);
+        if (trimmed.empty()) continue;
+        if (!first) out << ",";
+        out << "'" << sql_escape(trimmed) << "'";
+        first = false;
+    }
+    return out.str();
+}
+
 bool parse_sql_datetime(const std::string& value, std::tm& out) {
     const std::string text = trim(value);
     if (text.size() < 10) return false;
@@ -53,6 +66,39 @@ bool parse_sql_datetime(const std::string& value, std::tm& out) {
     return true;
 }
 
+bool valid_date_parts(int year, int month, int day) {
+    if (year < 1900 || year > 9999 || month < 1 || month > 12 || day < 1) return false;
+    static const int days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int max_day = days_in_month[month - 1];
+    const bool leap_year = (year % 400 == 0) || (year % 4 == 0 && year % 100 != 0);
+    if (month == 2 && leap_year) {
+        max_day = 29;
+    }
+    return day <= max_day;
+}
+
+std::string date_from_yyyymmdd_prefix(const std::string& value) {
+    const std::string text = trim(value);
+    if (text.size() < 8) return "";
+    if (!std::all_of(text.begin(), text.begin() + 8, [](unsigned char ch) { return std::isdigit(ch) != 0; })) {
+        return "";
+    }
+    const int year = std::atoi(text.substr(0, 4).c_str());
+    const int month = std::atoi(text.substr(4, 2).c_str());
+    const int day = std::atoi(text.substr(6, 2).c_str());
+    if (!valid_date_parts(year, month, day)) return "";
+    return text.substr(0, 4) + "-" + text.substr(4, 2) + "-" + text.substr(6, 2);
+}
+
+std::string date_from_sql_datetime(const std::string& value) {
+    std::tm parsed{};
+    if (!parse_sql_datetime(value, parsed)) return "";
+    char buffer[11] = {};
+    std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d",
+                  parsed.tm_year + 1900, parsed.tm_mon + 1, parsed.tm_mday);
+    return buffer;
+}
+
 int seconds_between_sql_datetimes(const std::string& start, const std::string& end) {
     std::tm start_tm{};
     std::tm end_tm{};
@@ -67,6 +113,31 @@ int seconds_between_sql_datetimes(const std::string& start, const std::string& e
     const double seconds = std::difftime(end_time, start_time);
     if (seconds < 0) return -1;
     return static_cast<int>(seconds);
+}
+
+std::string age_from_birthdate(const std::string& birthdate) {
+    std::tm birth_tm{};
+    if (!parse_sql_datetime(birthdate, birth_tm)) {
+        return "";
+    }
+    std::time_t now_time = std::time(nullptr);
+    if (now_time == static_cast<std::time_t>(-1)) {
+        return "";
+    }
+    std::tm* now_tm = std::localtime(&now_time);
+    if (!now_tm) {
+        return "";
+    }
+
+    int years = now_tm->tm_year - birth_tm.tm_year;
+    if (now_tm->tm_mon < birth_tm.tm_mon ||
+        (now_tm->tm_mon == birth_tm.tm_mon && now_tm->tm_mday < birth_tm.tm_mday)) {
+        --years;
+    }
+    if (years < 0) {
+        return "";
+    }
+    return std::to_string(years) + "岁";
 }
 
 std::vector<std::string> split(const std::string& text, char delimiter) {
@@ -623,6 +694,10 @@ void add_lis_patient_filters(std::ostringstream& sql, const QueryFilters& filter
     if (!trim(filters.patient_no).empty()) {
         sql << " AND " << report_alias << ".REG_NO='" << sql_escape(trim(filters.patient_no)) << "'";
     }
+    const std::string patient_no_list = sql_string_list(filters.patient_nos);
+    if (!patient_no_list.empty()) {
+        sql << " AND " << report_alias << ".REG_NO IN (" << patient_no_list << ")";
+    }
     if (!trim(filters.patient_phone).empty()) {
         sql << " AND LTRIM(RTRIM(isnull(" << report_alias << ".PAT_PHONE,'')))='"
             << sql_escape(trim(filters.patient_phone)) << "'";
@@ -1115,6 +1190,10 @@ bool query_blood_lis_reports(const QueryFilters& filters, std::vector<ReportRow>
     if (!trim(filters.patient_no).empty()) {
         sql << " AND r.REG_NO='" << sql_escape(trim(filters.patient_no)) << "'";
     }
+    const std::string patient_no_list = sql_string_list(filters.patient_nos);
+    if (!patient_no_list.empty()) {
+        sql << " AND r.REG_NO IN (" << patient_no_list << ")";
+    }
     if (!trim(filters.patient_phone).empty()) {
         sql << " AND LTRIM(RTRIM(isnull(r.PAT_PHONE,'')))='" << sql_escape(trim(filters.patient_phone)) << "'";
     }
@@ -1199,6 +1278,59 @@ bool query_latest_report_phone_by_reg_no(const std::string& connection_string, c
 
     if (SQLFetch(stmt) == SQL_SUCCESS) {
         phone = fetch_column(stmt, 1);
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    error.clear();
+    return true;
+#endif
+}
+
+bool query_inpatient_nos_by_social_no_from_reg_no(const std::string& connection_string, const std::string& reg_no,
+                                                  std::vector<std::string>& inpatient_nos, std::string& error,
+                                                  LogFn log) {
+    inpatient_nos.clear();
+#ifndef _WIN32
+    (void)connection_string;
+    (void)reg_no;
+    (void)log;
+    error = "query_inpatient_nos_by_social_no_from_reg_no is only available on Windows";
+    return false;
+#else
+    const std::string trimmed_reg_no = trim(reg_no);
+    if (trimmed_reg_no.empty()) {
+        error.clear();
+        return true;
+    }
+
+    DbContext db;
+    if (!connect(connection_string, db, error, log)) {
+        return false;
+    }
+
+    std::ostringstream sql;
+    sql << "SELECT DISTINCT LTRIM(RTRIM(isnull(z2.INPATIENT_NO,'')))"
+        << " FROM ZY_INPATIENT z1 WITH (NOLOCK)"
+        << " INNER JOIN ZY_INPATIENT z2 WITH (NOLOCK)"
+        << " ON LTRIM(RTRIM(isnull(z2.SOCIAL_NO,'')))=LTRIM(RTRIM(isnull(z1.SOCIAL_NO,'')))"
+        << " WHERE LTRIM(RTRIM(isnull(z1.INPATIENT_NO,'')))='" << sql_escape(trimmed_reg_no) << "'"
+        << " AND NULLIF(LTRIM(RTRIM(isnull(z1.SOCIAL_NO,''))),'') IS NOT NULL"
+        << " AND NULLIF(LTRIM(RTRIM(isnull(z2.INPATIENT_NO,''))),'') IS NOT NULL"
+        << " ORDER BY LTRIM(RTRIM(isnull(z2.INPATIENT_NO,'')))";
+
+    if (log) {
+        log("exec sql: " + sql.str() + "\n");
+    }
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!exec_query(db.dbc, sql.str(), stmt, error)) {
+        return false;
+    }
+
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        const std::string inpatient_no = trim(fetch_column(stmt, 1));
+        if (!inpatient_no.empty()) {
+            inpatient_nos.push_back(inpatient_no);
+        }
     }
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     error.clear();
@@ -3135,6 +3267,188 @@ bool query_emergency_statistics(const EmergencyStatQuery& query, EmergencyStatSu
         if (agg.barcode_emergency) ++summary.barcode_emergency_count;
         if (agg.report_emergency) ++summary.report_emergency_count;
         if (agg.barcode_emergency && agg.report_emergency) ++summary.both_emergency_count;
+
+        rows.push_back(std::move(row));
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    error.clear();
+    return true;
+#endif
+}
+
+bool query_outpatient_charges(const OutpatientChargeQuery& query, std::vector<OutpatientChargeRow>& rows, std::string& error, LogFn log) {
+    rows.clear();
+#ifndef _WIN32
+    (void)query;
+    (void)log;
+    error = "query_outpatient_charges is only available on Windows";
+    return false;
+#else
+    const std::string start_time = trim(query.start_time);
+    const std::string end_time = trim(query.end_time);
+    if (start_time.empty() || end_time.empty()) {
+        error = "start_time and end_time are required";
+        return false;
+    }
+
+    DbContext db;
+    if (!connect(query.connection_string, db, error, log)) {
+        return false;
+    }
+
+    const std::string requested_campus = trim(query.lab_department);
+    const std::string outpatient_no = trim(query.outpatient_no);
+    const std::string outpatient_date = !outpatient_no.empty()
+                                            ? date_from_yyyymmdd_prefix(outpatient_no)
+                                            : "";
+    const std::string fallback_outpatient_date = !outpatient_no.empty()
+                                                     ? date_from_sql_datetime(end_time)
+                                                     : "";
+    std::ostringstream where;
+    if (!outpatient_no.empty() && (!outpatient_date.empty() || !fallback_outpatient_date.empty())) {
+        const std::string search_date = outpatient_date.empty() ? fallback_outpatient_date : outpatient_date;
+        where << " WHERE y.SFRQ>='" << sql_escape(search_date) << "'"
+              << " AND y.SFRQ<DATEADD(day,1,'" << sql_escape(search_date) << "')";
+    } else {
+        where << " WHERE y.SFRQ>='" << sql_escape(start_time) << "'"
+              << " AND y.SFRQ<DATEADD(minute,1,'" << sql_escape(end_time) << "')";
+    }
+    where << " AND (y.BSCBZ IS NULL OR y.BSCBZ=0)";
+    if (!query.include_non_lab && requested_campus == "全部") {
+        where << " AND LTRIM(RTRIM(CONVERT(varchar(100),y.ZXKS))) IN ('102','401')";
+    } else if (!query.include_non_lab && requested_campus == "老院") {
+        where << " AND LTRIM(RTRIM(CONVERT(varchar(100),y.ZXKS)))='102'";
+    } else if (!query.include_non_lab && requested_campus == "新院") {
+        where << " AND LTRIM(RTRIM(CONVERT(varchar(100),y.ZXKS)))='401'";
+    }
+    if (!outpatient_no.empty()) {
+        where << " AND LTRIM(RTRIM(CONVERT(varchar(100),y.BLH))) LIKE '%"
+              << sql_escape(outpatient_no) << "'";
+    }
+    if (!trim(query.patient_name).empty()) {
+        where << " AND p.BRXM LIKE '%" << sql_escape(trim(query.patient_name)) << "%'";
+    }
+    if (!trim(query.id_card).empty()) {
+        where << " AND p.SFZH LIKE '%" << sql_escape(trim(query.id_card)) << "%'";
+    }
+
+    std::ostringstream sql;
+    sql << "SELECT "
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.BLH))),'') AS BLH,"
+        << "CASE WHEN NULLIF(LTRIM(RTRIM(CONVERT(varchar(100),isnull(y.FPH,'')))),'') IS NULL THEN '0'"
+        << " ELSE LTRIM(RTRIM(CONVERT(varchar(100),y.FPH))) END AS FPH,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),p.SFZH))),'') AS SFZH,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),p.BRXM))),'') AS BRXM,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(20),p.XB))),'') AS XB,"
+        << "isnull(CONVERT(varchar(23),p.CSRQ,121),'') AS CSRQ,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(200),y.SQNR))),'') AS SQNR,"
+        << "isnull(NULLIF(LTRIM(RTRIM(dept.NAME)),''),"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.SQKS))),'')) AS SQKS,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.DJ))),'') AS DJ,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.SL))),'') AS SL,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.DW))),'') AS DW,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.JE))),'') AS JE,"
+        << "isnull(CONVERT(varchar(19),y.SFRQ,120),'') AS SFRQ,"
+        << "CASE WHEN NULLIF(LTRIM(RTRIM(CONVERT(varchar(100),isnull(y.TXM,'')))),'') IS NULL THEN '未生成'"
+        << " ELSE LTRIM(RTRIM(CONVERT(varchar(100),y.TXM))) END AS TXM,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.BBMC))),'') AS BBMC,"
+        << "isnull(CONVERT(varchar(19),y.TXMDYSJ,120),'') AS TXMDYSJ,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.ZXKS))),'') AS ZXKS"
+        << " FROM YJ_MZSQ y WITH (NOLOCK)"
+        << " LEFT JOIN YY_BRXX p WITH (NOLOCK) ON p.BRXXID=y.BRXXID"
+        << " LEFT JOIN JC_DEPT_PROPERTY dept WITH (NOLOCK)"
+        << " ON LTRIM(RTRIM(CONVERT(varchar(100),dept.DEPT_ID)))=LTRIM(RTRIM(CONVERT(varchar(100),y.SQKS)))"
+        << " AND isnull(dept.DELETED,0)=0"
+        << where.str()
+        << " ORDER BY y.SFRQ DESC";
+
+    if (log) log("exec sql: " + sql.str() + "\n");
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!exec_query(db.dbc, sql.str(), stmt, error)) {
+        return false;
+    }
+
+    const auto normalize_sex = [](const std::string& value) {
+        const std::string text = trim(value);
+        if (text == "1") return std::string("男");
+        if (text == "2") return std::string("女");
+        return text;
+    };
+    const auto normalize_campus = [](const std::string& value) {
+        const std::string text = trim(value);
+        if (text == "401") {
+            return std::string("新院");
+        }
+        if (text == "102") {
+            return std::string("老院");
+        }
+        return text;
+    };
+    const auto has_generated_barcode = [](const std::string& value) {
+        const std::string text = trim(value);
+        return !text.empty() && text != "未生成";
+    };
+
+    std::map<std::string, size_t> barcode_index;
+    std::map<std::string, std::set<std::string>> barcode_item_names;
+
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        OutpatientChargeRow row;
+        row.outpatient_no = fetch_column(stmt, 1);
+        row.invoice_no = fetch_column(stmt, 2);
+        row.card_no = fetch_column(stmt, 3);
+        row.name = fetch_column(stmt, 4);
+        row.sex = normalize_sex(fetch_column(stmt, 5));
+        row.age = age_from_birthdate(fetch_column(stmt, 6));
+        row.item_name = fetch_column(stmt, 7);
+        row.application_department = fetch_column(stmt, 8);
+        row.unit_price = fetch_column(stmt, 9);
+        row.quantity = fetch_column(stmt, 10);
+        row.unit = fetch_column(stmt, 11);
+        row.amount = fetch_column(stmt, 12);
+        row.charge_time = fetch_column(stmt, 13);
+        row.barcode = fetch_column(stmt, 14);
+        row.sample_name = fetch_column(stmt, 15);
+        row.barcode_print_time = fetch_column(stmt, 16);
+        row.lab_department = normalize_campus(fetch_column(stmt, 17));
+        if (!query.include_non_lab && (requested_campus == "老院" || requested_campus == "新院") &&
+            !row.lab_department.empty() && row.lab_department != requested_campus) {
+            continue;
+        }
+
+        if (has_generated_barcode(row.barcode)) {
+            const std::string barcode = trim(row.barcode);
+            auto found = barcode_index.find(barcode);
+            if (found == barcode_index.end()) {
+                barcode_index[barcode] = rows.size();
+                found = barcode_index.find(barcode);
+                rows.push_back(std::move(row));
+                const std::string item_name = trim(rows.back().item_name);
+                if (!item_name.empty()) {
+                    barcode_item_names[barcode].insert(item_name);
+                }
+                continue;
+            }
+
+            auto& target = rows[found->second];
+            const std::string item_name = trim(row.item_name);
+            if (!item_name.empty() && barcode_item_names[barcode].insert(item_name).second) {
+                if (!target.item_name.empty()) target.item_name += "/";
+                target.item_name += item_name;
+            }
+            fill_if_empty(target.invoice_no, row.invoice_no);
+            fill_if_empty(target.card_no, row.card_no);
+            fill_if_empty(target.name, row.name);
+            fill_if_empty(target.sex, row.sex);
+            fill_if_empty(target.age, row.age);
+            fill_if_empty(target.application_department, row.application_department);
+            fill_if_empty(target.sample_name, row.sample_name);
+            fill_if_empty(target.barcode_print_time, row.barcode_print_time);
+            fill_if_empty(target.lab_department, row.lab_department);
+            continue;
+        }
 
         rows.push_back(std::move(row));
     }

@@ -12,6 +12,7 @@ struct QueryFilters {
     std::string barcode;
     std::string patient_name;
     std::string patient_no;
+    std::vector<std::string> patient_nos;
     std::string patient_phone;
     std::string oper_no;
     std::string start_date;
@@ -453,6 +454,37 @@ struct EmergencyStatQuery {
     bool only_unfinished = false;
 };
 
+struct OutpatientChargeQuery {
+    std::string connection_string;
+    std::string start_time;
+    std::string end_time;
+    std::string lab_department;  // 全部/老院/新院
+    bool include_non_lab = false;
+    std::string outpatient_no;
+    std::string patient_name;
+    std::string id_card;
+};
+
+struct OutpatientChargeRow {
+    std::string outpatient_no;
+    std::string invoice_no;
+    std::string card_no;
+    std::string name;
+    std::string sex;
+    std::string age;
+    std::string item_name;
+    std::string application_department;
+    std::string unit_price;
+    std::string quantity;
+    std::string unit;
+    std::string amount;
+    std::string charge_time;
+    std::string barcode;
+    std::string sample_name;
+    std::string barcode_print_time;
+    std::string lab_department;
+};
+
 using LogFn = std::function<void(const std::string&)>;
 
 bool query_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log = {});
@@ -463,6 +495,7 @@ bool query_report_machine_picker_machines(const std::string& connection_string, 
 bool query_reports(const QueryFilters& filters, std::vector<ReportRow>& rows, std::string& error, LogFn log = {});
 bool query_blood_lis_reports(const QueryFilters& filters, std::vector<ReportRow>& rows, std::string& error, LogFn log = {});
 bool query_latest_report_phone_by_reg_no(const std::string& connection_string, const std::string& reg_no, std::string& phone, std::string& error, LogFn log = {});
+bool query_inpatient_nos_by_social_no_from_reg_no(const std::string& connection_string, const std::string& reg_no, std::vector<std::string>& inpatient_nos, std::string& error, LogFn log = {});
 bool query_results(const std::string& connection_string, const std::string& rep_no, std::vector<ResultRow>& rows, std::string& error, LogFn log = {});
 bool query_quality_control_lis_results(const QualityControlLisQuery& query, std::vector<QualityControlLisRow>& rows, std::string& error, LogFn log = {});
 bool query_quality_control_sample_items(const QualityControlSampleItemsQuery& query, std::vector<QualityControlSampleItemRow>& rows, std::string& error, LogFn log = {});
@@ -475,5 +508,6 @@ bool query_specimen_barcode(const SpecimenBarcodeQuery& query, SpecimenBarcodeRe
 bool query_specimen_signed_list(const SpecimenSignedListQuery& query, std::vector<SpecimenSignedListRow>& rows, std::string& error, LogFn log = {});
 bool query_hiv_statistics(const HivStatQuery& query, HivStatSummary& summary, std::vector<HivStatDetailRow>& rows, std::string& error, LogFn log = {});
 bool query_emergency_statistics(const EmergencyStatQuery& query, EmergencyStatSummary& summary, std::vector<EmergencyStatDetailRow>& rows, std::string& error, LogFn log = {});
+bool query_outpatient_charges(const OutpatientChargeQuery& query, std::vector<OutpatientChargeRow>& rows, std::string& error, LogFn log = {});
 
 }  // namespace search

@@ -28,6 +28,7 @@
 #include "mchc_correction_module.h"
 #include "menu_toolbar.h"
 #include "module_registry.h"
+#include "outpatient_query_module.h"
 #include "phone_directory_module.h"
 #include "quality_control_module.h"
 #include "query_module.h"
@@ -59,6 +60,7 @@ constexpr int IDM_TOOL2        = 3012;
 constexpr int IDM_TOOL3        = 3013;
 constexpr int IDM_TOOL4        = 3014;
 constexpr int IDM_TOOL5        = 3015;
+constexpr int IDM_TOOL6        = 3016;
 constexpr int IDM_STAT1        = 3021;
 constexpr int IDM_STAT2        = 3022;
 constexpr int IDM_STAT3        = 3023;
@@ -233,7 +235,8 @@ int toolbarCommandForMdiChild(HWND child) {
     if (lstrcmpW(title, L"输血结果查询") == 0) return IDM_BLOOD;
     if (lstrcmpW(title, L"检验结果查询") == 0) return IDM_QUERY;
     if (lstrcmpW(title, L"质控分析") == 0) return IDM_QCONTROL;
-    if (lstrcmpW(title, L"常用电话") == 0) return IDM_TOOL5;
+    if (lstrcmpW(title, L"门诊查询") == 0) return IDM_TOOL5;
+    if (lstrcmpW(title, L"常用电话") == 0) return IDM_TOOL6;
     return 0;
 }
 
@@ -267,7 +270,8 @@ const ModuleDef g_modules[] = {
     { L"RegularReport", L"工具", L"常规报告(&2)",       IDM_TOOL2,   create_regular_report_module },
     { L"SpecimenSign", L"工具",  L"标本签收中心(&3)",   IDM_TOOL3,   create_specimen_sign_module },
     { L"MchcCorrection", L"工具", L"脂血MCHC校正(&4)", IDM_TOOL4, create_mchc_correction_module },
-    { L"PhoneDirectory", L"工具", L"常用电话(&5)",       IDM_TOOL5,   create_phone_directory_module },
+    { L"OutpatientQuery", L"工具", L"门诊查询(&5)", IDM_TOOL5, create_outpatient_query_module },
+    { L"PhoneDirectory", L"工具", L"常用电话(&6)",       IDM_TOOL6,   create_phone_directory_module },
     { L"HivStatistics", L"统计分析管理", L"HIV 抗体检测统计(&1)", IDM_STAT1, create_hiv_statistics_module },
     { L"EmergencyStatistics", L"统计分析管理", L"急诊样本统计(&2)", IDM_STAT2, create_emergency_statistics_module },
     { L"Stat4",    L"统计分析管理", L"统计分析4(&4)",    IDM_STAT4,   create_stat4_placeholder },
@@ -657,7 +661,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             mtAddButton(tb, L"输血查询", IDM_BLOOD);
             mtAddButton(tb, L"结果查询", IDM_QUERY);
             mtAddButton(tb, L"质控分析", IDM_QCONTROL);
-            mtAddButton(tb, L"常用电话", IDM_TOOL5);
+            mtAddButton(tb, L"门诊查询", IDM_TOOL5);
+            mtAddButton(tb, L"常用电话", IDM_TOOL6);
             mtAddStretch(tb);
             mtAddCloseButton(tb, L"关闭当前", ID_BTNCLOSE, false);
 

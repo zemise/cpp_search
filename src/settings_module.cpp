@@ -53,6 +53,7 @@ constexpr int IDC_SET_UPDATE_MANIFEST_LABEL = 5129;
 constexpr int IDC_SET_UPDATE_FOLDER_LABEL = 5130;
 constexpr int IDC_SET_LIS_DIRECT_ANTIGLOBULIN_CODES = 5131;
 constexpr int IDC_SET_LIS_IRREGULAR_ANTIBODY_CODES = 5132;
+constexpr int IDC_SET_ZEBRA_CHINESE_FONT = 5133;
 constexpr int IDC_LABEL_SERVER = 5201;
 constexpr int IDC_LABEL_INITIAL_DATABASE = 5202;
 constexpr int IDC_LABEL_USER = 5203;
@@ -92,6 +93,7 @@ constexpr int IDC_TEXT_QUALITY_CONTROL_HINT = 5236;
 constexpr int IDC_SETTINGS_TABS = 5237;
 constexpr int IDC_LABEL_LIS_DIRECT_ANTIGLOBULIN_CODES = 5238;
 constexpr int IDC_LABEL_LIS_IRREGULAR_ANTIBODY_CODES = 5239;
+constexpr int IDC_LABEL_ZEBRA_CHINESE_FONT = 5240;
 
 constexpr const wchar_t* WND_CLASS  = L"SettingsModuleChild";
 constexpr const wchar_t* PICKER_CLASS = L"SettingsMachinePicker";
@@ -297,10 +299,11 @@ void updateSettingsPageVisibility(HWND hwnd, SettingsState* st) {
     for (int id : lisIds) showChild(hwnd, id, lis);
 
     const int reportIds[] = {IDC_TEXT_SECTION_REPORT, IDC_TEXT_REPORT_HINT, IDC_TEXT_REPORT_PRINTER, IDC_TEXT_REPORT_QUICK,
-                             IDC_LABEL_BARCODE_PRINTER, IDC_SET_BARCODE_PRINTER, IDC_LABEL_QUICK_MACHINE_1,
-                             IDC_SET_QUICK_MACHINE_1, IDC_SET_QUICK_MACHINE_PICK_1, IDC_LABEL_QUICK_MACHINE_2,
-                             IDC_SET_QUICK_MACHINE_2, IDC_SET_QUICK_MACHINE_PICK_2, IDC_LABEL_QUICK_MACHINE_3,
-                             IDC_SET_QUICK_MACHINE_3, IDC_SET_QUICK_MACHINE_PICK_3};
+                             IDC_LABEL_BARCODE_PRINTER, IDC_SET_BARCODE_PRINTER, IDC_LABEL_ZEBRA_CHINESE_FONT,
+                             IDC_SET_ZEBRA_CHINESE_FONT, IDC_LABEL_QUICK_MACHINE_1, IDC_SET_QUICK_MACHINE_1,
+                             IDC_SET_QUICK_MACHINE_PICK_1, IDC_LABEL_QUICK_MACHINE_2, IDC_SET_QUICK_MACHINE_2,
+                             IDC_SET_QUICK_MACHINE_PICK_2, IDC_LABEL_QUICK_MACHINE_3, IDC_SET_QUICK_MACHINE_3,
+                             IDC_SET_QUICK_MACHINE_PICK_3};
     for (int id : reportIds) showChild(hwnd, id, report);
 
     const int qcIds[] = {IDC_TEXT_SECTION_QUALITY_CONTROL, IDC_TEXT_QUALITY_CONTROL_HINT};
@@ -393,15 +396,22 @@ void layoutSettingsWindow(HWND hwnd) {
         moveChild(hwnd, IDC_LABEL_BARCODE_PRINTER, labelX, y, labelW, editH);
         moveChild(hwnd, IDC_SET_BARCODE_PRINTER, ctrlX, y, l.report.right - cardPadX - ctrlX, editH);
     }
+    {
+        const int y = l.report.top + S(128);
+        const int labelX = l.report.left + cardPadX;
+        const int ctrlX = labelX + labelW + controlGap;
+        moveChild(hwnd, IDC_LABEL_ZEBRA_CHINESE_FONT, labelX, y, labelW, editH);
+        moveChild(hwnd, IDC_SET_ZEBRA_CHINESE_FONT, ctrlX, y, S(180), S(160));
+    }
     moveChild(hwnd, IDC_TEXT_REPORT_QUICK,
-              l.report.left + cardPadX, l.report.top + S(134),
+              l.report.left + cardPadX, l.report.top + S(168),
               l.report.right - l.report.left - cardPadX * 2, S(22));
     for (int i = 0; i < QUICK_MACHINE_COUNT; ++i) {
         const int labelId = i == 0 ? IDC_LABEL_QUICK_MACHINE_1 :
                             (i == 1 ? IDC_LABEL_QUICK_MACHINE_2 : IDC_LABEL_QUICK_MACHINE_3);
         const int pickId = i == 0 ? IDC_SET_QUICK_MACHINE_PICK_1 :
                            (i == 1 ? IDC_SET_QUICK_MACHINE_PICK_2 : IDC_SET_QUICK_MACHINE_PICK_3);
-        const int y = l.report.top + S(160) + i * rowGap;
+        const int y = l.report.top + S(194) + i * rowGap;
         const int labelX = l.report.left + cardPadX;
         const int ctrlX = labelX + labelW + controlGap;
         const int buttonW = S(38);
@@ -667,6 +677,19 @@ void populatePrinterCombo(HWND hwnd) {
     if (selected >= 0) {
         SendMessageW(combo, CB_SETCURSEL, selected, 0);
     }
+}
+
+void populateZebraChineseFontCombo(HWND hwnd) {
+    HWND combo = GetDlgItem(hwnd, IDC_SET_ZEBRA_CHINESE_FONT);
+    if (!combo) return;
+
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(combo, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(search::zebra_simsun_font()));
+    SendMessageW(combo, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(search::zebra_csong_font()));
+    const std::wstring configured = search::configured_zebra_chinese_font();
+    selectComboText(combo, configured.c_str(), 0);
 }
 
 search::DbSettings collectForm(HWND hwnd) {
@@ -967,6 +990,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             createSettingLabel(hwnd, IDC_LABEL_BARCODE_PRINTER, L"条码打印机");
             search::create_combo(hwnd, IDC_SET_BARCODE_PRINTER, 0, 0, S(10), S(220), false);
+            createSettingLabel(hwnd, IDC_LABEL_ZEBRA_CHINESE_FONT, L"Zebra 字体");
+            search::create_combo(hwnd, IDC_SET_ZEBRA_CHINESE_FONT, 0, 0, S(10), S(160), false);
             createSettingLabel(hwnd, IDC_LABEL_QUICK_MACHINE_1, L"快捷仪器 1");
             search::create_edit(hwnd, IDC_SET_QUICK_MACHINE_1, 0, 0, S(10), S(24));
             search::create_button(hwnd, IDC_SET_QUICK_MACHINE_PICK_1, L"...", 0, 0, S(40), S(28));
@@ -1024,6 +1049,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SendMessageW(GetDlgItem(hwnd, quickMachineEditId(i)), EM_SETREADONLY, TRUE, 0);
             }
             populatePrinterCombo(hwnd);
+            populateZebraChineseFontCombo(hwnd);
             populateUpdateSourceCombo(hwnd);
             SetWindowTextW(GetDlgItem(hwnd, IDC_SET_UPDATE_MANIFEST_URL),
                            search::load_module_str(lis_update::kConfigSection, L"ManifestUrl",
@@ -1180,6 +1206,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 search::save_module_str(L"RegularReport", L"BarcodePrinterName",
                                         readCombo(hwnd, IDC_SET_BARCODE_PRINTER));
+                search::save_module_str(L"RegularReport", L"ZebraChineseFont",
+                                        search::normalize_zebra_chinese_font(
+                                            readCombo(hwnd, IDC_SET_ZEBRA_CHINESE_FONT)));
                 for (int i = 0; i < QUICK_MACHINE_COUNT; ++i) {
                     search::save_module_str(L"RegularReport", quick_machine_code_key(i),
                                             search::utf8_to_wide(st->quickMachineCodes[static_cast<size_t>(i)]));
