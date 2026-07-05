@@ -253,6 +253,11 @@ struct BarcodeQueryRow {
     std::string cancel_operator; // 取消人
     std::string hzid;            // HZID
     std::string machine_status;  // 上机状态
+    std::string report_no;       // 跳转常规报告用 REP_NO
+    std::string machine_code;    // 跳转常规报告用 MACH_CODE
+    std::string machine_name;    // 跳转常规报告用 MACH_NAME
+    std::string room_code;       // 跳转常规报告用 ROOM_CODE
+    std::string inspect_date;    // 跳转常规报告用 CHK_DATE
 };
 
 struct BarcodeQueryFilters {
@@ -263,10 +268,9 @@ struct BarcodeQueryFilters {
     std::string barcode;
     std::string patient_name;
     std::string reg_no;
-    std::string machine_status;  // 全部/已签收未上机/已上机未审核/审核完成/发送完成/已审核未发送
+    std::string machine_status;  // 全部/已签收未上机/已上机未审核/已审核未发送/发送完成
     std::string room_code;
     bool canceled = false;       // true: CANCEL_DATE IS NOT NULL; false: CANCEL_DATE IS NULL
-    std::string sort_order;      // receive_asc/receive_desc/request/barcode
 };
 
 struct SpecimenOrderRow {

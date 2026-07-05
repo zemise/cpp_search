@@ -4,6 +4,7 @@
 
 #include "main_app.h"
 #include "resource.h"
+#include "regular_report_module.h"
 #include "search_core.h"
 #include "log.h"
 #include "search_text.h"
@@ -27,6 +28,7 @@
 namespace {
 
 constexpr const wchar_t* WND_CLASS = L"BarcodeModuleChild";
+constexpr const wchar_t* LEGEND_CLASS = L"BarcodeStatusLegend";
 constexpr const wchar_t* WINDOW_TITLE = L"已签收条码查询";
 constexpr const wchar_t* PROP_STATE = L"BarcodeSt";
 constexpr UINT WM_BARCODE_LOADED = WM_APP + 501;
@@ -39,7 +41,6 @@ constexpr int IDC_NAME = 4105;
 constexpr int IDC_REG_NO = 4106;
 constexpr int IDC_MACHINE_STATUS = 4107;
 constexpr int IDC_ROOM = 4108;
-constexpr int IDC_SORT = 4109;
 constexpr int IDC_NOT_CANCELED = 4110;
 constexpr int IDC_CANCELED = 4111;
 constexpr int IDC_QUERY = 4112;
@@ -53,6 +54,10 @@ constexpr int IDC_STATUS = 4121;
 constexpr int FIRST_DATA_COLUMN = 1;
 constexpr int LAST_DATA_COLUMN = 25;
 constexpr UINT IDM_COPY_CELL = 41201;
+const COLORREF COLOR_NOT_MACHINE = RGB(0xFF, 0xFF, 0x54);
+const COLORREF COLOR_LOADED_NOT_REVIEWED = RGB(0xFF, 0xFF, 0xFF);
+const COLORREF COLOR_REVIEWED_NOT_SENT = RGB(0x6F, 0x94, 0xE6);
+const COLORREF COLOR_SENT = RGB(0x99, 0xBB, 0x90);
 
 struct BarcodeState {
     ModuleContext ctx;
@@ -64,7 +69,6 @@ struct BarcodeState {
     HWND regNo = nullptr;
     HWND machineStatus = nullptr;
     HWND room = nullptr;
-    HWND sort = nullptr;
     HWND notCanceled = nullptr;
     HWND canceled = nullptr;
     HWND query = nullptr;
@@ -169,13 +173,9 @@ void fillStaticCombos(BarcodeState* st) {
     addComboItem(st->dateField, L"上机日期");
     SendMessageW(st->dateField, CB_SETCURSEL, 1, 0);
 
-    const wchar_t* statuses[] = {L"全部", L"已签收未上机", L"已上机未审核", L"审核完成", L"发送完成", L"已审核未发送"};
+    const wchar_t* statuses[] = {L"全部", L"已签收未上机", L"已上机未审核", L"已审核未发送", L"发送完成"};
     for (const auto* text : statuses) addComboItem(st->machineStatus, text);
     SendMessageW(st->machineStatus, CB_SETCURSEL, 2, 0);
-
-    const wchar_t* sorts[] = {L"签收时间升序", L"签收时间倒序", L"申请时间倒序", L"条形码倒序"};
-    for (const auto* text : sorts) addComboItem(st->sort, text);
-    SendMessageW(st->sort, CB_SETCURSEL, 0, 0);
 }
 
 void loadRooms(BarcodeState* st) {
@@ -213,6 +213,71 @@ HWND button(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h
 
 void addColumn(HWND list, int index, const wchar_t* title, int width) {
     search::add_list_column(list, index, title, width);
+}
+
+struct LegendItem {
+    const wchar_t* text;
+    COLORREF color;
+    int x;
+    int y;
+};
+
+LRESULT CALLBACK legendProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(dc, &rc, reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1));
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(0, 0, 0));
+
+            HFONT font = nullptr;
+            if (auto* st = reinterpret_cast<BarcodeState*>(GetPropW(GetParent(hwnd), PROP_STATE))) {
+                font = st->ctx.uiFont;
+            }
+            HGDIOBJ oldFont = nullptr;
+            if (font) oldFont = SelectObject(dc, font);
+
+            const float s = search::dpi_scale_factor(hwnd);
+            auto S = [s](int v) { return static_cast<int>(v * s); };
+            const LegendItem items[] = {
+                {L"已签收未上机", COLOR_NOT_MACHINE, 0, 2},
+                {L"已上机未审核", COLOR_LOADED_NOT_REVIEWED, 116, 2},
+                {L"已审核未发送", COLOR_REVIEWED_NOT_SENT, 248, 2},
+                {L"发送完成", COLOR_SENT, 380, 2},
+            };
+            for (const auto& item : items) {
+                RECT swatch{S(item.x), S(item.y + 3), S(item.x + 12), S(item.y + 15)};
+                HBRUSH brush = CreateSolidBrush(item.color);
+                FillRect(dc, &swatch, brush);
+                DeleteObject(brush);
+                FrameRect(dc, &swatch, reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+                RECT textRc{S(item.x + 17), S(item.y), rc.right, S(item.y + 20)};
+                DrawTextW(dc, item.text, -1, &textRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+            if (oldFont) SelectObject(dc, oldFont);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void registerLegendClass(HINSTANCE instance) {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = legendProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.lpszClassName = LEGEND_CLASS;
+    RegisterClassW(&wc);
+    registered = true;
 }
 
 std::string csvEscape(const std::string& text) {
@@ -327,22 +392,25 @@ LRESULT CALLBACK searchEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 void createControls(HWND hwnd, BarcodeState* st) {
     const float s = search::dpi_scale_factor(hwnd);
     auto S = [s](int v) { return static_cast<int>(v * s); };
+    registerLegendClass(GetModuleHandleW(nullptr));
 
     st->dateField = search::create_combo(hwnd, IDC_DATE_FIELD, S(8), S(8), S(88), S(160), false);
-    st->startDate = search::create_date_picker(hwnd, IDC_START_DATE, S(104), S(8), S(104), S(24));
-    label(hwnd, L"至", S(214), S(11), S(24), S(22));
-    st->endDate = search::create_date_picker(hwnd, IDC_END_DATE, S(244), S(8), S(104), S(24));
-    label(hwnd, L"条形码:", S(356), S(11), S(58), S(22));
-    st->barcode = search::create_edit(hwnd, IDC_BARCODE, S(420), S(8), S(148), S(24));
+    st->startDate = search::create_date_picker(hwnd, IDC_START_DATE, S(104), S(8), S(112), S(24));
+    label(hwnd, L"至", S(220), S(11), S(20), S(22));
+    st->endDate = search::create_date_picker(hwnd, IDC_END_DATE, S(244), S(8), S(112), S(24));
+    label(hwnd, L"条形码:", S(360), S(11), S(58), S(22));
+    st->barcode = search::create_edit(hwnd, IDC_BARCODE, S(424), S(8), S(124), S(24));
     SetWindowSubclass(st->barcode, searchEditProc, 1, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"姓  名:", S(572), S(11), S(58), S(22));
-    st->name = search::create_edit(hwnd, IDC_NAME, S(638), S(8), S(148), S(24));
+    label(hwnd, L"姓  名:", S(552), S(11), S(58), S(22));
+    st->name = search::create_edit(hwnd, IDC_NAME, S(614), S(8), S(124), S(24));
     SetWindowSubclass(st->name, searchEditProc, 2, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"病人号:", S(792), S(11), S(58), S(22));
-    st->regNo = search::create_edit(hwnd, IDC_REG_NO, S(858), S(8), S(150), S(24));
+    label(hwnd, L"病人号:", S(742), S(11), S(58), S(22));
+    st->regNo = search::create_edit(hwnd, IDC_REG_NO, S(804), S(8), S(110), S(24));
     SetWindowSubclass(st->regNo, searchEditProc, 3, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"上机状态:", S(1018), S(11), S(78), S(22));
-    st->machineStatus = search::create_combo(hwnd, IDC_MACHINE_STATUS, S(1100), S(8), S(132), S(160), false);
+    label(hwnd, L"专业组", S(916), S(11), S(50), S(22));
+    st->room = search::create_combo(hwnd, IDC_ROOM, S(968), S(8), S(100), S(160), false);
+    label(hwnd, L"上机状态:", S(1072), S(11), S(72), S(22));
+    st->machineStatus = search::create_combo(hwnd, IDC_MACHINE_STATUS, S(1148), S(8), S(120), S(160), false);
 
     st->notCanceled = CreateWindowExW(0, L"BUTTON", L"未取消签收", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                       S(10), S(42), S(98), S(24), hwnd, win32_control_id(IDC_NOT_CANCELED), GetModuleHandleW(nullptr), nullptr);
@@ -361,12 +429,9 @@ void createControls(HWND hwnd, BarcodeState* st) {
     EnableWindow(st->cancelReason, FALSE);
     EnableWindow(st->exportExcel, FALSE);
 
-    st->legend = leftLabel(hwnd, L"白色已上机；黄色未上机；蓝色已审核；深绿色已发送", S(846), S(46), S(210), S(46));
-    SetWindowTextW(st->legend, L"白色已上机；黄色未上机；\r\n蓝色已审核；深绿色已发送");
-    label(hwnd, L"专业组", S(1038), S(48), S(60), S(22));
-    st->room = search::create_combo(hwnd, IDC_ROOM, S(1100), S(44), S(132), S(160), false);
-    label(hwnd, L"排序", S(1038), S(78), S(60), S(22));
-    st->sort = search::create_combo(hwnd, IDC_SORT, S(1100), S(74), S(132), S(160), false);
+    st->legend = CreateWindowExW(0, LEGEND_CLASS, L"", WS_CHILD | WS_VISIBLE,
+                                 S(770), S(52), S(460), S(24), hwnd, nullptr,
+                                 GetModuleHandleW(nullptr), nullptr);
 
     st->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
@@ -569,6 +634,30 @@ void sortRowsByColumn(BarcodeState* st, int col) {
     }
 }
 
+void openRegularReportForRow(HWND owner, BarcodeState* st, int index) {
+    if (!st || index < 0 || index >= static_cast<int>(st->rows.size())) return;
+    const auto& row = st->rows[static_cast<size_t>(index)];
+    if (search::trim(row.report_no).empty() || search::trim(row.machine_code).empty() ||
+        search::trim(row.inspect_date).empty()) {
+        MessageBoxW(owner, L"该条码为已签收未上机，无法跳转到常规报告。", WINDOW_TITLE, MB_ICONINFORMATION);
+        return;
+    }
+
+    auto* target = new RegularReportOpenTarget;
+    target->rep_no = search::trim(row.report_no);
+    target->oper_no = search::trim(row.sample_no);
+    target->inspect_date = search::trim(row.inspect_date);
+    target->mach_code = search::trim(row.machine_code);
+    target->mach_name = search::trim(row.machine_name);
+    target->room_code = search::trim(row.room_code);
+
+    HWND regular = create_regular_report_module(st->ctx);
+    if (!regular || !PostMessageW(regular, WM_REGULAR_OPEN_REPORT, 0, reinterpret_cast<LPARAM>(target))) {
+        delete target;
+        MessageBoxW(owner, L"常规报告页面打开失败。", WINDOW_TITLE, MB_ICONERROR);
+    }
+}
+
 void showCellContextMenu(HWND hwnd, BarcodeState* st) {
     if (!st || !st->list) return;
     POINT screenPt{};
@@ -623,11 +712,6 @@ search::BarcodeQueryFilters collectFilters(BarcodeState* st) {
         f.room_code = st->rooms[static_cast<size_t>(roomIdx - 1)].room_code;
     }
 
-    const auto sort = comboText(st->sort);
-    f.sort_order = sort == "签收时间倒序" ? "receive_desc" :
-                   sort == "申请时间倒序" ? "request" :
-                   sort == "条形码倒序" ? "barcode" :
-                   "receive_asc";
     return f;
 }
 
@@ -714,10 +798,10 @@ void exportRowsCsv(HWND hwnd, BarcodeState* st) {
 }
 
 COLORREF rowColor(const search::BarcodeQueryRow& row) {
-    if (row.machine_status == "未上机") return RGB(0xFF, 0xFF, 0x54);
-    if (row.machine_status == "审核完成") return RGB(0x6F, 0x94, 0xE6);
-    if (row.machine_status == "发送完成") return RGB(0x99, 0xBB, 0x90);
-    return RGB(0xFF, 0xFF, 0xFF);
+    if (row.machine_status == "已签收未上机") return COLOR_NOT_MACHINE;
+    if (row.machine_status == "已审核未发送") return COLOR_REVIEWED_NOT_SENT;
+    if (row.machine_status == "发送完成") return COLOR_SENT;
+    return COLOR_LOADED_NOT_REVIEWED;
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -745,6 +829,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 st->ctx.uiFont = reinterpret_cast<HFONT>(lp);
                 search::apply_font_to_children(hwnd, st->ctx.uiFont);
                 layout(hwnd, st);
+                if (st->legend) InvalidateRect(st->legend, nullptr, TRUE);
             }
             return 0;
         case WM_COMMAND:
@@ -777,6 +862,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 if (nm->idFrom == IDC_LIST && nm->code == NM_RCLICK) {
                     showCellContextMenu(hwnd, st);
+                    return 0;
+                }
+                if (nm->idFrom == IDC_LIST && nm->code == NM_DBLCLK) {
+                    auto* item = reinterpret_cast<NMITEMACTIVATE*>(lp);
+                    openRegularReportForRow(hwnd, st, item ? item->iItem : -1);
                     return 0;
                 }
                 if (nm->idFrom == IDC_LIST && nm->code == NM_CUSTOMDRAW) {

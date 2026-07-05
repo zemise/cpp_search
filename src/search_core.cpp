@@ -725,24 +725,28 @@ void add_barcode_machine_status(std::ostringstream& sql, const std::string& valu
         return;
     }
     if (status == "已签收未上机") {
-        sql << " AND b.OPER_STATE=0";
+        sql << " AND isnull(rs.REPORT_SENT,0)=0"
+            << " AND isnull(rs.REPORT_REVIEWED,0)=0"
+            << " AND isnull(rs.HAS_REPORT,0)=0"
+            << " AND isnull(b.OPER_STATE,0)=0";
     } else if (status == "已上机未审核") {
-        sql << " AND b.OPER_STATE=1";
-    } else if (status == "审核完成") {
-        sql << " AND b.OPER_STATE=2";
+        sql << " AND isnull(rs.REPORT_SENT,0)=0"
+            << " AND isnull(rs.REPORT_REVIEWED,0)=0"
+            << " AND (isnull(rs.HAS_REPORT,0)=1 OR isnull(b.OPER_STATE,0)>=1)";
     } else if (status == "已审核未发送") {
-        sql << " AND 1=0";
+        sql << " AND isnull(rs.REPORT_SENT,0)=0"
+            << " AND isnull(rs.REPORT_REVIEWED,0)=1";
     } else if (status == "发送完成") {
-        sql << " AND b.OPER_STATE=3";
+        sql << " AND isnull(rs.REPORT_SENT,0)=1";
     }
 }
 
 const char* barcode_machine_status_sql() {
-    return "CASE b.OPER_STATE"
-           " WHEN 0 THEN '未上机'"
-           " WHEN 1 THEN '已上机'"
-           " WHEN 2 THEN '审核完成'"
-           " WHEN 3 THEN '发送完成'"
+    return "CASE"
+           " WHEN isnull(rs.REPORT_SENT,0)=1 THEN '发送完成'"
+           " WHEN isnull(rs.REPORT_REVIEWED,0)=1 THEN '已审核未发送'"
+           " WHEN isnull(rs.HAS_REPORT,0)=1 OR isnull(b.OPER_STATE,0)>=1 THEN '已上机未审核'"
+           " WHEN isnull(b.OPER_STATE,0)=0 THEN '已签收未上机'"
            " ELSE '' END";
 }
 
@@ -2055,26 +2059,11 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
 
     add_barcode_machine_status(where, filters.machine_status);
 
-    const auto sort = trim(filters.sort_order);
-    std::string order_expr;
-    if (sort == "request") {
-        order_expr = "b.REQ_TIME DESC,b.ID DESC";
-    } else if (sort == "barcode") {
-        order_expr = "b.BARCODE DESC,b.ID DESC";
-    } else if (sort == "receive_desc") {
-        order_expr = "b.IN_DATE DESC,b.ID DESC";
-    } else {
-        order_expr = "b.IN_DATE ASC,b.ID ASC";
-    }
+    const std::string order_expr = "b.IN_DATE ASC,b.ID ASC";
 
     std::ostringstream sql;
     sql << "SELECT "
-        << "isnull((SELECT TOP 1 LTRIM(RTRIM(r.OPER_NO))"
-        << " FROM LS_AS_REPORT r WITH (NOLOCK)"
-        << " WHERE isnull(r.DELETE_BIT,0)=0"
-        << " AND r.TXM_NO=b.BARCODE"
-        << " AND nullif(LTRIM(RTRIM(r.OPER_NO)),'') IS NOT NULL"
-        << " ORDER BY r.CHK_DATE DESC,r.REP_NO DESC),'')"
+        << "isnull(LTRIM(RTRIM(rd.OPER_NO)),'')"
         << ",isnull(CONVERT(varchar(10),b.JZ_FLAG),'') AS emergency,"
         << "isnull(LTRIM(RTRIM(b.BARCODE)),'') AS barcode,"
         << "isnull(LTRIM(RTRIM(b.REG_NO)),'') AS reg_no,"
@@ -2098,8 +2087,29 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         << "isnull(CONVERT(varchar(19),b.CANCEL_DATE,120),'') AS cancel_time,"
         << "isnull(LTRIM(RTRIM(b.CANCEL_OPER)),'') AS cancel_operator,"
         << "isnull(CONVERT(varchar(30),b.HZID),'') AS hzid,"
-        << barcode_machine_status_sql() << " AS machine_status"
+        << barcode_machine_status_sql() << " AS machine_status,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(30),rd.REP_NO))),'') AS report_no,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(20),rd.MACH_CODE))),'') AS machine_code,"
+        << "isnull(nullif(LTRIM(RTRIM(rd.MACH_NAME)),''),isnull(LTRIM(RTRIM(CONVERT(varchar(20),rd.MACH_CODE))),'')) AS machine_name,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(20),rd.ROOM_CODE))),'') AS room_code,"
+        << "isnull(CONVERT(varchar(19),rd.CHK_DATE,120),'') AS inspect_date"
         << " FROM LS_AS_BARCODE b WITH (NOLOCK)"
+        << " OUTER APPLY (SELECT"
+        << " MAX(CASE WHEN NULLIF(LTRIM(RTRIM(CONVERT(varchar(30),r.REP_NO))),'') IS NOT NULL THEN 1 ELSE 0 END) AS HAS_REPORT,"
+        << " MAX(CASE WHEN LTRIM(RTRIM(isnull(r.CHK_FLAG,'')))='T' THEN 1 ELSE 0 END) AS REPORT_REVIEWED,"
+        << " MAX(CASE WHEN LTRIM(RTRIM(isnull(r.CONF,'')))='S' THEN 1 ELSE 0 END) AS REPORT_SENT"
+        << " FROM LS_AS_REPORT r WITH (NOLOCK)"
+        << " WHERE isnull(r.DELETE_BIT,0)=0"
+        << " AND r.TXM_NO=b.BARCODE) rs"
+        << " OUTER APPLY (SELECT TOP 1"
+        << " r.REP_NO,r.OPER_NO,r.CHK_DATE,r.MACH_CODE,r.ROOM_CODE,mach.MACH_NAME"
+        << " FROM LS_AS_REPORT r WITH (NOLOCK)"
+        << " LEFT JOIN LS_AS_MACHINE mach WITH (NOLOCK)"
+        << " ON r.MACH_CODE=mach.MACH_CODE AND r.ROOM_CODE=mach.ROOM_CODE AND mach.DELETE_BIT=0"
+        << " WHERE isnull(r.DELETE_BIT,0)=0"
+        << " AND r.TXM_NO=b.BARCODE"
+        << " AND NULLIF(LTRIM(RTRIM(CONVERT(varchar(30),r.REP_NO))),'') IS NOT NULL"
+        << " ORDER BY r.CHK_DATE DESC,r.REP_TIME DESC,r.REP_NO DESC) rd"
         << where.str()
         << " ORDER BY " << order_expr;
 
@@ -2135,6 +2145,11 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         row.cancel_operator = fetch_column(stmt, 23);
         row.hzid           = fetch_column(stmt, 24);
         row.machine_status = fetch_column(stmt, 25);
+        row.report_no      = fetch_column(stmt, 26);
+        row.machine_code   = fetch_column(stmt, 27);
+        row.machine_name   = fetch_column(stmt, 28);
+        row.room_code      = fetch_column(stmt, 29);
+        row.inspect_date   = fetch_column(stmt, 30);
         rows.push_back(row);
     }
 

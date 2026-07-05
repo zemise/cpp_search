@@ -269,7 +269,9 @@ HIV 统计表导出：
 
 日期类型下拉框按 `申请日期 / 签收日期 / 上机日期` 展示，默认选中 `签收日期`，开始日期和结束日期默认当天。条形码、姓名和病人号输入框按回车会直接触发同一查询路径。
 
-结果列表支持点击除首个空白列外的表头进行本地升降序排序，只重排当前已加载的 `BarcodeQueryRow` 内存数据，不重新访问数据库；费用列按数值比较，其余列按文本比较，排序前会记录当前选中行，重绘后再恢复选中并滚动到可见位置。顶部 `排序` 下拉框仍作为数据库查询返回顺序的初始排序条件；用户点过表头后，后续查询结果会继续按当前表头排序展示。结果列表也支持右键复制当前业务单元格，首个空白占位列不弹出复制菜单。
+结果列表支持点击除首个空白列外的表头进行本地升降序排序，只重排当前已加载的 `BarcodeQueryRow` 内存数据，不重新访问数据库；费用列按数值比较，其余列按文本比较，排序前会记录当前选中行，重绘后再恢复选中并滚动到可见位置。页面不再提供独立排序下拉框，数据库初始返回顺序固定为签收时间升序；用户点过表头后，后续查询结果会继续按当前表头排序展示。结果列表也支持右键复制当前业务单元格，首个空白占位列不弹出复制菜单。
+
+结果列表双击行会复用常规报告的 `RegularReportOpenTarget + WM_REGULAR_OPEN_REPORT` 机制，携带同条码最近有效报告的 `REP_NO / OPER_NO / MACH_CODE / MACH_NAME / ROOM_CODE / CHK_DATE` 跳转到 `常规报告` 并定位目标报告；未匹配到有效报告、仪器或检验日期时不跳转并提示该条码为已签收未上机。
 
 `导出Excel` 按钮在当前列表有数据后启用，导出为 UTF-8 BOM CSV 文件，默认文件名包含日期类型和查询日期范围。导出内容使用当前内存列表顺序和所有可见业务列，不导出首个空白占位列，也不重新访问 LIS。
 
@@ -286,13 +288,14 @@ HIV 统计表导出：
 | 专业组 | `LS_AS_BARCODE.ROOM_CODE`，下拉来源 `LS_AS_ROOM` |
 | 未取消签收 | `LS_AS_BARCODE.CANCEL_DATE IS NULL` |
 | 取消签收 | `LS_AS_BARCODE.CANCEL_DATE IS NOT NULL` |
-| 已签收未上机 | `LS_AS_BARCODE.OPER_STATE = 0` |
-| 已上机未审核 | `LS_AS_BARCODE.OPER_STATE = 1` |
-| 审核完成 | `LS_AS_BARCODE.OPER_STATE = 2` |
-| 发送完成 | `LS_AS_BARCODE.OPER_STATE = 3` |
-| 已审核未发送 | 暂时空置，查询条件为 `1=0` |
+| 已签收未上机 | 未匹配到有效 `LS_AS_REPORT.REP_NO`，`LS_AS_REPORT.CHK_FLAG<>'T'`，`LS_AS_REPORT.CONF<>'S'`，且 `LS_AS_BARCODE.OPER_STATE=0` |
+| 已上机未审核 | 已匹配到有效 `LS_AS_REPORT.REP_NO` 或 `LS_AS_BARCODE.OPER_STATE>=1`，且 `LS_AS_REPORT.CHK_FLAG<>'T'`，`LS_AS_REPORT.CONF<>'S'` |
+| 已审核未发送 | `LS_AS_REPORT.CHK_FLAG='T'` 且 `LS_AS_REPORT.CONF<>'S'` |
+| 发送完成 | `LS_AS_REPORT.CONF='S'` |
 
-上机状态直接读取 `LS_AS_BARCODE.OPER_STATE`，不再通过 `LS_AS_REPORT` 的审核/发送字段推导。
+上机状态不再直接裸用 `LS_AS_BARCODE.OPER_STATE`。查询会按条码号聚合 `LS_AS_REPORT`，优先以报告链路校正状态：`CONF='S'` 优先显示发送完成；否则 `CHK_FLAG='T'` 显示已审核未发送；否则已存在有效报告号或 `OPER_STATE>=1` 显示已上机未审核；最后 `OPER_STATE=0` 显示已签收未上机。这样可以规避条码表 `OPER_STATE` 更新滞后造成的状态不准。
+
+`专业组` 筛选控件位于第一行 `上机状态` 前。按钮区右侧状态图例使用横向小色块加文字展示 `已签收未上机 / 已上机未审核 / 已审核未发送 / 发送完成`，色块颜色与列表行背景色一致，便于和筛选结果直接对照。
 
 ### 列表字段
 
@@ -322,7 +325,7 @@ HIV 统计表导出：
 | 取消时间 | `LS_AS_BARCODE.CANCEL_DATE` |
 | 取消人 | `LS_AS_BARCODE.CANCEL_OPER` |
 | HZID | `LS_AS_BARCODE.HZID` |
-| 上机状态 | `LS_AS_BARCODE.OPER_STATE`，列表显示 `0=未上机`、`1=已上机`、`2=审核完成`、`3=发送完成`；筛选下拉仍保留 `已审核未发送`，但该项暂时不关联实际状态 |
+| 上机状态 | 报告链路优先派生状态，显示 `已签收未上机 / 已上机未审核 / 已审核未发送 / 发送完成` |
 
 列表不合并同一条形码的多条记录，保持 `LS_AS_BARCODE` 查询结果一行对应一行，避免因聚合造成现场查询变慢。
 
