@@ -12,7 +12,7 @@
 
 CI 会从 LabelPrint GitHub Release 下载 `v1.2.10` 的 Win7 兼容包，通过 `build_main.ps1 -LabelPrintPackagePath` 传给 CMake，再用 `packaging/LISWorkbench.nsi` 打包。产物可从 Actions 页面下载 Artifacts。安装包会包含 `lis_workbench.exe` 和自动更新器 `Updater.exe`。出于隐私考虑，HIV 统计表 DOCX 模版不随安装包发布，需要在页面中通过 `上传模版` 放入安装目录 `templates\HIVStatisticsTemplate.docx`。常用电话 RTF 文件同样不随安装包发布，现场可在 `常用电话` 页面上传，或自行放入安装目录 `documents`。
 
-推送与 `src/version.h` 一致的 `v*` 标签时，例如 `v2026.07.04`，CI 会自动创建或更新同名 GitHub Release，并上传；普通分支 push 和 PR 只生成 Actions artifact，不发布 Release。
+推送与 `src/version.h` 一致的 `v*` 标签时，例如 `v2026.07.05`，CI 会自动创建或更新同名 GitHub Release，并上传；普通分支 push 和 PR 只生成 Actions artifact，不发布 Release。
 
 ```text
 LISWorkbench-Setup-<version>-win7-win11.exe
@@ -104,7 +104,7 @@ out\windows\update\updates\LISWorkbench-<version>-win7-win11.zip
 
 # NSIS 安装包
 New-Item -ItemType Directory -Force out\windows\installer
-& "C:\Program Files (x86)\NSIS\makensis.exe" /DAPP_VERSION=v2026.07.04 /DAPP_EXE=lis_workbench.exe /DBUILD_DIR=..\build\main-app\Release /DOUTPUT_DIR=..\out\windows\installer /DOUTPUT_NAME=LISWorkbench-Setup.exe packaging\LISWorkbench.nsi
+& "C:\Program Files (x86)\NSIS\makensis.exe" /DAPP_VERSION=v2026.07.05 /DAPP_EXE=lis_workbench.exe /DBUILD_DIR=..\build\main-app\Release /DOUTPUT_DIR=..\out\windows\installer /DOUTPUT_NAME=LISWorkbench-Setup.exe packaging\LISWorkbench.nsi
 ```
 
 如果只面向 Windows 10/11，可以使用 VS 2026 对应的 LabelPrint release 包：

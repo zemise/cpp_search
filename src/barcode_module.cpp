@@ -15,8 +15,11 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,6 +50,9 @@ constexpr int IDC_CANCEL_REASON = 4116;
 constexpr int IDC_EXPORT = 4118;
 constexpr int IDC_LIST = 4120;
 constexpr int IDC_STATUS = 4121;
+constexpr int FIRST_DATA_COLUMN = 1;
+constexpr int LAST_DATA_COLUMN = 25;
+constexpr UINT IDM_COPY_CELL = 41201;
 
 struct BarcodeState {
     ModuleContext ctx;
@@ -73,6 +79,8 @@ struct BarcodeState {
     HBRUSH bgBrush = nullptr;
     std::vector<search::RoomOption> rooms;
     std::vector<search::BarcodeQueryRow> rows;
+    int listSortColumn = -1;
+    bool listSortAscending = true;
     std::thread bgThread;
 };
 
@@ -87,6 +95,37 @@ struct ListColumn {
     const wchar_t* title;
     int width;
 };
+
+const ListColumn BARCODE_COLUMNS[] = {
+    {0, L"", 24},
+    {1, L"样本号", 58},
+    {2, L"急诊", 44},
+    {3, L"条形码", 104},
+    {4, L"病人号", 90},
+    {5, L"类型", 56},
+    {6, L"姓名", 86},
+    {7, L"性别", 48},
+    {8, L"申请科室", 110},
+    {9, L"床号", 70},
+    {10, L"签收人", 100},
+    {11, L"签收时间", 150},
+    {12, L"医嘱内容", 230},
+    {13, L"标本", 72},
+    {14, L"费用", 76},
+    {15, L"申请医生", 90},
+    {16, L"状态", 66},
+    {17, L"备注", 58},
+    {18, L"原因", 58},
+    {19, L"送检", 70},
+    {20, L"送检时间", 140},
+    {21, L"申请时间", 150},
+    {22, L"取消时间", 140},
+    {23, L"取消人", 82},
+    {24, L"HZID", 70},
+    {25, L"上机状态", 112},
+};
+
+void runQuery(HWND hwnd, BarcodeState* st);
 
 std::string textOf(HWND hwnd) {
     wchar_t buf[512]{};
@@ -128,7 +167,7 @@ void fillStaticCombos(BarcodeState* st) {
     addComboItem(st->dateField, L"申请日期");
     addComboItem(st->dateField, L"签收日期");
     addComboItem(st->dateField, L"上机日期");
-    SendMessageW(st->dateField, CB_SETCURSEL, 0, 0);
+    SendMessageW(st->dateField, CB_SETCURSEL, 1, 0);
 
     const wchar_t* statuses[] = {L"全部", L"已签收未上机", L"已上机未审核", L"审核完成", L"发送完成", L"已审核未发送"};
     for (const auto* text : statuses) addComboItem(st->machineStatus, text);
@@ -176,6 +215,115 @@ void addColumn(HWND list, int index, const wchar_t* title, int width) {
     search::add_list_column(list, index, title, width);
 }
 
+std::string csvEscape(const std::string& text) {
+    const bool quote = text.find_first_of(",\"\r\n") != std::string::npos;
+    std::string out;
+    out.reserve(text.size() + 2);
+    if (quote) out.push_back('"');
+    for (const char ch : text) {
+        if (ch == '"') {
+            out += "\"\"";
+        } else {
+            out.push_back(ch);
+        }
+    }
+    if (quote) out.push_back('"');
+    return out;
+}
+
+std::string sanitizeFilenamePart(std::string text) {
+    text = search::trim(text);
+    for (char& ch : text) {
+        switch (ch) {
+            case '\\':
+            case '/':
+            case ':':
+            case '*':
+            case '?':
+            case '"':
+            case '<':
+            case '>':
+            case '|':
+                ch = '_';
+                break;
+            default:
+                break;
+        }
+    }
+    return text;
+}
+
+std::wstring defaultExportFilename(BarcodeState* st) {
+    std::string filename = "已签收条码";
+    const std::string dateField = sanitizeFilenamePart(comboText(st->dateField));
+    const std::string start = sanitizeFilenamePart(dateText(st->startDate));
+    const std::string end = sanitizeFilenamePart(dateText(st->endDate));
+    if (!dateField.empty()) filename += "-" + dateField;
+    if (!start.empty()) filename += "-" + start;
+    if (!end.empty() && end != start) filename += "至" + end;
+    filename += ".csv";
+    return search::utf8_to_wide(filename);
+}
+
+bool chooseExportPath(HWND owner, BarcodeState* st, std::wstring& path) {
+    wchar_t buffer[MAX_PATH]{};
+    const std::wstring defaultName = defaultExportFilename(st);
+    lstrcpynW(buffer, defaultName.c_str(), MAX_PATH);
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = buffer;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"csv";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (!GetSaveFileNameW(&ofn)) return false;
+    path = buffer;
+    return true;
+}
+
+bool copyTextToClipboard(HWND owner, const std::wstring& text) {
+    if (!OpenClipboard(owner)) return false;
+    EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!mem) {
+        CloseClipboard();
+        return false;
+    }
+    void* locked = GlobalLock(mem);
+    if (!locked) {
+        GlobalFree(mem);
+        CloseClipboard();
+        return false;
+    }
+    std::memcpy(locked, text.c_str(), bytes);
+    GlobalUnlock(mem);
+    if (!SetClipboardData(CF_UNICODETEXT, mem)) {
+        GlobalFree(mem);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    return true;
+}
+
+LRESULT CALLBACK searchEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                UINT_PTR subclassId, DWORD_PTR refData) {
+    if (msg == WM_GETDLGCODE) {
+        return DefSubclassProc(hwnd, msg, wp, lp) | DLGC_WANTALLKEYS;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
+        HWND parent = reinterpret_cast<HWND>(refData);
+        SendMessageW(parent, WM_COMMAND, MAKEWPARAM(IDC_QUERY, BN_CLICKED), 0);
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, searchEditProc, subclassId);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 void createControls(HWND hwnd, BarcodeState* st) {
     const float s = search::dpi_scale_factor(hwnd);
     auto S = [s](int v) { return static_cast<int>(v * s); };
@@ -186,10 +334,13 @@ void createControls(HWND hwnd, BarcodeState* st) {
     st->endDate = search::create_date_picker(hwnd, IDC_END_DATE, S(244), S(8), S(104), S(24));
     label(hwnd, L"条形码:", S(356), S(11), S(58), S(22));
     st->barcode = search::create_edit(hwnd, IDC_BARCODE, S(420), S(8), S(148), S(24));
+    SetWindowSubclass(st->barcode, searchEditProc, 1, reinterpret_cast<DWORD_PTR>(hwnd));
     label(hwnd, L"姓  名:", S(572), S(11), S(58), S(22));
     st->name = search::create_edit(hwnd, IDC_NAME, S(638), S(8), S(148), S(24));
+    SetWindowSubclass(st->name, searchEditProc, 2, reinterpret_cast<DWORD_PTR>(hwnd));
     label(hwnd, L"病人号:", S(792), S(11), S(58), S(22));
     st->regNo = search::create_edit(hwnd, IDC_REG_NO, S(858), S(8), S(150), S(24));
+    SetWindowSubclass(st->regNo, searchEditProc, 3, reinterpret_cast<DWORD_PTR>(hwnd));
     label(hwnd, L"上机状态:", S(1018), S(11), S(78), S(22));
     st->machineStatus = search::create_combo(hwnd, IDC_MACHINE_STATUS, S(1100), S(8), S(132), S(160), false);
 
@@ -221,35 +372,7 @@ void createControls(HWND hwnd, BarcodeState* st) {
                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
                                S(4), S(120), S(1240), S(420), hwnd, win32_control_id(IDC_LIST), GetModuleHandleW(nullptr), nullptr);
     ListView_SetExtendedListViewStyle(st->list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
-    const ListColumn columns[] = {
-        {0, L"", 24},
-        {1, L"样本号", 58},
-        {2, L"急诊", 44},
-        {3, L"条形码", 104},
-        {4, L"病人号", 90},
-        {5, L"类型", 56},
-        {6, L"姓名", 86},
-        {7, L"性别", 48},
-        {8, L"申请科室", 110},
-        {9, L"床号", 70},
-        {10, L"签收人", 100},
-        {11, L"签收时间", 150},
-        {12, L"医嘱内容", 230},
-        {13, L"标本", 72},
-        {14, L"费用", 76},
-        {15, L"申请医生", 90},
-        {16, L"状态", 66},
-        {17, L"备注", 58},
-        {18, L"原因", 58},
-        {19, L"送检", 70},
-        {20, L"送检时间", 140},
-        {21, L"申请时间", 150},
-        {22, L"取消时间", 140},
-        {23, L"取消人", 82},
-        {24, L"HZID", 70},
-        {25, L"上机状态", 112},
-    };
-    for (const auto& column : columns) {
+    for (const auto& column : BARCODE_COLUMNS) {
         addColumn(st->list, column.index, column.title, S(column.width));
     }
 
@@ -324,6 +447,164 @@ void insertRow(HWND list, int index, const search::BarcodeQueryRow& row) {
     }
 }
 
+const std::string& barcodeSortValue(const search::BarcodeQueryRow& row, int col) {
+    static const std::string empty;
+    switch (col) {
+        case 1: return row.sample_no;
+        case 2: return row.emergency;
+        case 3: return row.barcode;
+        case 4: return row.reg_no;
+        case 5: return row.type_name;
+        case 6: return row.name;
+        case 7: return row.sex;
+        case 8: return row.dept_name;
+        case 9: return row.bed_no;
+        case 10: return row.receiver;
+        case 11: return row.receive_time;
+        case 12: return row.order_text;
+        case 13: return row.sample_name;
+        case 14: return row.fee;
+        case 15: return row.request_doctor;
+        case 16: return row.status;
+        case 17: return row.note;
+        case 18: return row.reason;
+        case 19: return row.submitter;
+        case 20: return row.submit_time;
+        case 21: return row.request_time;
+        case 22: return row.cancel_time;
+        case 23: return row.cancel_operator;
+        case 24: return row.hzid;
+        case 25: return row.machine_status;
+        default: return empty;
+    }
+}
+
+bool parseDouble(const std::string& text, double& value) {
+    const std::string trimmed = search::trim(text);
+    if (trimmed.empty()) return false;
+    char* end = nullptr;
+    value = std::strtod(trimmed.c_str(), &end);
+    return end && *end == '\0';
+}
+
+int compareBarcodeSortValue(const search::BarcodeQueryRow& a,
+                            const search::BarcodeQueryRow& b,
+                            int col) {
+    const std::string left = search::trim(barcodeSortValue(a, col));
+    const std::string right = search::trim(barcodeSortValue(b, col));
+    if (col == 14) {
+        double ln = 0.0, rn = 0.0;
+        const bool lok = parseDouble(left, ln);
+        const bool rok = parseDouble(right, rn);
+        if (lok && rok) {
+            if (ln < rn) return -1;
+            if (ln > rn) return 1;
+            return 0;
+        }
+        if (lok != rok) return lok ? -1 : 1;
+    }
+    if (left < right) return -1;
+    if (left > right) return 1;
+    return 0;
+}
+
+std::string barcodeRowKey(const search::BarcodeQueryRow& row) {
+    return row.barcode + "|" + row.sample_no + "|" + row.reg_no + "|" + row.order_text;
+}
+
+void updateExportButton(BarcodeState* st) {
+    if (!st || !st->exportExcel) return;
+    EnableWindow(st->exportExcel, !st->rows.empty());
+}
+
+void sortBarcodeRowsForDisplay(BarcodeState* st) {
+    if (!st || st->listSortColumn < FIRST_DATA_COLUMN || st->listSortColumn > LAST_DATA_COLUMN) return;
+    const int col = st->listSortColumn;
+    const bool ascending = st->listSortAscending;
+    std::stable_sort(st->rows.begin(), st->rows.end(),
+                     [col, ascending](const auto& a, const auto& b) {
+                         const int cmp = compareBarcodeSortValue(a, b, col);
+                         return ascending ? cmp < 0 : cmp > 0;
+                     });
+}
+
+void presentRows(BarcodeState* st) {
+    if (!st || !st->list) return;
+    SendMessageW(st->list, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(st->list);
+    for (size_t i = 0; i < st->rows.size(); ++i) {
+        insertRow(st->list, static_cast<int>(i), st->rows[i]);
+    }
+    SendMessageW(st->list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(st->list, nullptr, TRUE);
+}
+
+void sortRowsByColumn(BarcodeState* st, int col) {
+    if (!st || !st->list || st->rows.empty() || col < FIRST_DATA_COLUMN || col > LAST_DATA_COLUMN) return;
+    if (st->listSortColumn == col) {
+        st->listSortAscending = !st->listSortAscending;
+    } else {
+        st->listSortColumn = col;
+        st->listSortAscending = true;
+    }
+
+    std::string selectedKey;
+    const int selected = ListView_GetNextItem(st->list, -1, LVNI_SELECTED);
+    if (selected >= 0 && selected < static_cast<int>(st->rows.size())) {
+        selectedKey = barcodeRowKey(st->rows[static_cast<size_t>(selected)]);
+    }
+
+    sortBarcodeRowsForDisplay(st);
+    presentRows(st);
+
+    if (!selectedKey.empty()) {
+        for (int i = 0; i < static_cast<int>(st->rows.size()); ++i) {
+            if (barcodeRowKey(st->rows[static_cast<size_t>(i)]) == selectedKey) {
+                ListView_SetItemState(st->list, i, LVIS_SELECTED | LVIS_FOCUSED,
+                                      LVIS_SELECTED | LVIS_FOCUSED);
+                ListView_EnsureVisible(st->list, i, FALSE);
+                break;
+            }
+        }
+    }
+}
+
+void showCellContextMenu(HWND hwnd, BarcodeState* st) {
+    if (!st || !st->list) return;
+    POINT screenPt{};
+    GetCursorPos(&screenPt);
+    POINT listPt = screenPt;
+    ScreenToClient(st->list, &listPt);
+
+    LVHITTESTINFO hit{};
+    hit.pt = listPt;
+    const int row = ListView_SubItemHitTest(st->list, &hit);
+    if (row < 0 || row >= static_cast<int>(st->rows.size()) ||
+        hit.iSubItem < FIRST_DATA_COLUMN || hit.iSubItem > LAST_DATA_COLUMN) {
+        return;
+    }
+
+    ListView_SetItemState(st->list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_SetItemState(st->list, row, LVIS_SELECTED | LVIS_FOCUSED,
+                          LVIS_SELECTED | LVIS_FOCUSED);
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, IDM_COPY_CELL, L"复制单元格");
+    const UINT command = TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                                        screenPt.x, screenPt.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    if (command != IDM_COPY_CELL) return;
+
+    const std::wstring text = search::utf8_to_wide(
+        barcodeSortValue(st->rows[static_cast<size_t>(row)], hit.iSubItem));
+    if (copyTextToClipboard(hwnd, text)) {
+        setStatus(st, L"已复制单元格：" + std::wstring(BARCODE_COLUMNS[hit.iSubItem].title));
+    } else {
+        setStatus(st, L"复制单元格失败。");
+    }
+}
+
 search::BarcodeQueryFilters collectFilters(BarcodeState* st) {
     search::BarcodeQueryFilters f;
     f.connection_string = search::wide_to_utf8(search::build_connection_string_w(st->ctx.dbSettings));
@@ -377,17 +658,59 @@ void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult
     if (!result->ok) {
         setStatus(st, L"查询失败。");
         MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
+        updateExportButton(st);
         return;
     }
     st->rows = std::move(result->rows);
-    SendMessageW(st->list, WM_SETREDRAW, FALSE, 0);
-    ListView_DeleteAllItems(st->list);
-    for (size_t i = 0; i < st->rows.size(); ++i) {
-        insertRow(st->list, static_cast<int>(i), st->rows[i]);
-    }
-    SendMessageW(st->list, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(st->list, nullptr, TRUE);
+    sortBarcodeRowsForDisplay(st);
+    presentRows(st);
+    updateExportButton(st);
     setStatus(st, L"查询完成，共 " + std::to_wstring(st->rows.size()) + L" 条。");
+}
+
+void exportRowsCsv(HWND hwnd, BarcodeState* st) {
+    if (!st || st->rows.empty()) {
+        MessageBoxW(hwnd, L"当前没有可导出的条码记录。", WINDOW_TITLE, MB_ICONINFORMATION);
+        return;
+    }
+
+    std::wstring path;
+    if (!chooseExportPath(hwnd, st, path)) return;
+
+    FILE* file = nullptr;
+#ifdef _MSC_VER
+    _wfopen_s(&file, path.c_str(), L"wb");
+#else
+    file = _wfopen(path.c_str(), L"wb");
+#endif
+    if (!file) {
+        MessageBoxW(hwnd, L"导出文件创建失败，请确认目标位置可写。", WINDOW_TITLE, MB_ICONERROR);
+        return;
+    }
+
+    std::ostringstream csv;
+    csv << "\xEF\xBB\xBF";
+    bool firstColumn = true;
+    for (const auto& column : BARCODE_COLUMNS) {
+        if (column.index < FIRST_DATA_COLUMN || column.index > LAST_DATA_COLUMN) continue;
+        if (!firstColumn) csv << ',';
+        firstColumn = false;
+        csv << csvEscape(search::wide_to_utf8(column.title));
+    }
+    csv << '\n';
+    for (const auto& row : st->rows) {
+        for (int col = FIRST_DATA_COLUMN; col <= LAST_DATA_COLUMN; ++col) {
+            if (col > FIRST_DATA_COLUMN) csv << ',';
+            csv << csvEscape(barcodeSortValue(row, col));
+        }
+        csv << '\n';
+    }
+    const std::string text = csv.str();
+    fwrite(text.data(), 1, text.size(), file);
+    fclose(file);
+
+    setStatus(st, L"已导出条码记录：" + path);
+    MessageBoxW(hwnd, (L"已导出条码记录：\n" + path).c_str(), WINDOW_TITLE, MB_ICONINFORMATION);
 }
 
 COLORREF rowColor(const search::BarcodeQueryRow& row) {
@@ -431,6 +754,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_REFRESH:
                     runQuery(hwnd, st);
                     return 0;
+                case IDC_EXPORT:
+                    exportRowsCsv(hwnd, st);
+                    return 0;
             }
             break;
         case WM_BARCODE_LOADED:
@@ -444,6 +770,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_NOTIFY:
             if (st) {
                 auto* nm = reinterpret_cast<NMHDR*>(lp);
+                if (nm->idFrom == IDC_LIST && nm->code == LVN_COLUMNCLICK) {
+                    auto* clicked = reinterpret_cast<NMLISTVIEW*>(lp);
+                    sortRowsByColumn(st, clicked->iSubItem);
+                    return 0;
+                }
+                if (nm->idFrom == IDC_LIST && nm->code == NM_RCLICK) {
+                    showCellContextMenu(hwnd, st);
+                    return 0;
+                }
                 if (nm->idFrom == IDC_LIST && nm->code == NM_CUSTOMDRAW) {
                     auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(lp);
                     if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
