@@ -52,7 +52,7 @@ constexpr int IDC_EXPORT = 4118;
 constexpr int IDC_LIST = 4120;
 constexpr int IDC_STATUS = 4121;
 constexpr int FIRST_DATA_COLUMN = 1;
-constexpr int LAST_DATA_COLUMN = 25;
+constexpr int LAST_DATA_COLUMN = 27;
 constexpr UINT IDM_COPY_CELL = 41201;
 const COLORREF COLOR_NOT_MACHINE = RGB(0xFF, 0xFF, 0x54);
 const COLORREF COLOR_LOADED_NOT_REVIEWED = RGB(0xFF, 0xFF, 0xFF);
@@ -115,18 +115,20 @@ const ListColumn BARCODE_COLUMNS[] = {
     {11, L"签收时间", 150},
     {12, L"医嘱内容", 230},
     {13, L"标本", 72},
-    {14, L"费用", 76},
-    {15, L"申请医生", 90},
-    {16, L"状态", 66},
-    {17, L"备注", 58},
-    {18, L"原因", 58},
-    {19, L"送检", 70},
-    {20, L"送检时间", 140},
-    {21, L"申请时间", 150},
-    {22, L"取消时间", 140},
-    {23, L"取消人", 82},
-    {24, L"HZID", 70},
-    {25, L"上机状态", 112},
+    {14, L"检验者", 80},
+    {15, L"审核者", 80},
+    {16, L"费用", 76},
+    {17, L"申请医生", 90},
+    {18, L"状态", 66},
+    {19, L"备注", 58},
+    {20, L"原因", 58},
+    {21, L"送检", 70},
+    {22, L"送检时间", 140},
+    {23, L"申请时间", 150},
+    {24, L"取消时间", 140},
+    {25, L"取消人", 82},
+    {26, L"HZID", 70},
+    {27, L"上机状态", 112},
 };
 
 void runQuery(HWND hwnd, BarcodeState* st);
@@ -148,15 +150,25 @@ std::string comboText(HWND hwnd) {
 std::string dateText(HWND hwnd) {
     SYSTEMTIME st{};
     if (DateTime_GetSystemtime(hwnd, &st) != GDT_VALID) return "";
-    char buf[16]{};
-    sprintf_s(buf, "%04u-%02u-%02u", st.wYear, st.wMonth, st.wDay);
+    char buf[20]{};
+    sprintf_s(buf, "%04u-%02u-%02u %02u:%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
     return buf;
 }
 
-void setToday(HWND hwnd) {
+void setToday(HWND hwnd, bool endOfDay) {
     SYSTEMTIME st{};
     GetLocalTime(&st);
+    st.wHour = endOfDay ? 23 : 0;
+    st.wMinute = endOfDay ? 59 : 0;
+    st.wSecond = 0;
+    st.wMilliseconds = 0;
     DateTime_SetSystemtime(hwnd, GDT_VALID, &st);
+}
+
+HWND dateTimePicker(HWND parent, int id, int x, int y, int w, int h) {
+    HWND hwnd = search::create_date_picker(parent, id, x, y, w, h);
+    DateTime_SetFormat(hwnd, L"yyyy-MM-dd HH:mm");
+    return hwnd;
 }
 
 void setStatus(BarcodeState* st, const std::wstring& text) {
@@ -395,22 +407,22 @@ void createControls(HWND hwnd, BarcodeState* st) {
     registerLegendClass(GetModuleHandleW(nullptr));
 
     st->dateField = search::create_combo(hwnd, IDC_DATE_FIELD, S(8), S(8), S(88), S(160), false);
-    st->startDate = search::create_date_picker(hwnd, IDC_START_DATE, S(104), S(8), S(112), S(24));
-    label(hwnd, L"至", S(220), S(11), S(20), S(22));
-    st->endDate = search::create_date_picker(hwnd, IDC_END_DATE, S(244), S(8), S(112), S(24));
-    label(hwnd, L"条形码:", S(360), S(11), S(58), S(22));
-    st->barcode = search::create_edit(hwnd, IDC_BARCODE, S(424), S(8), S(124), S(24));
+    st->startDate = dateTimePicker(hwnd, IDC_START_DATE, S(104), S(8), S(160), S(24));
+    label(hwnd, L"至", S(268), S(11), S(20), S(22));
+    st->endDate = dateTimePicker(hwnd, IDC_END_DATE, S(292), S(8), S(160), S(24));
+    label(hwnd, L"条形码:", S(456), S(11), S(58), S(22));
+    st->barcode = search::create_edit(hwnd, IDC_BARCODE, S(518), S(8), S(140), S(24));
     SetWindowSubclass(st->barcode, searchEditProc, 1, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"姓  名:", S(552), S(11), S(58), S(22));
-    st->name = search::create_edit(hwnd, IDC_NAME, S(614), S(8), S(124), S(24));
+    label(hwnd, L"姓  名:", S(662), S(11), S(58), S(22));
+    st->name = search::create_edit(hwnd, IDC_NAME, S(724), S(8), S(96), S(24));
     SetWindowSubclass(st->name, searchEditProc, 2, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"病人号:", S(742), S(11), S(58), S(22));
-    st->regNo = search::create_edit(hwnd, IDC_REG_NO, S(804), S(8), S(110), S(24));
+    label(hwnd, L"病人号:", S(824), S(11), S(58), S(22));
+    st->regNo = search::create_edit(hwnd, IDC_REG_NO, S(886), S(8), S(124), S(24));
     SetWindowSubclass(st->regNo, searchEditProc, 3, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"专业组", S(916), S(11), S(50), S(22));
-    st->room = search::create_combo(hwnd, IDC_ROOM, S(968), S(8), S(100), S(160), false);
-    label(hwnd, L"上机状态:", S(1072), S(11), S(72), S(22));
-    st->machineStatus = search::create_combo(hwnd, IDC_MACHINE_STATUS, S(1148), S(8), S(120), S(160), false);
+    label(hwnd, L"专业组", S(1014), S(11), S(46), S(22));
+    st->room = search::create_combo(hwnd, IDC_ROOM, S(1064), S(8), S(100), S(160), false);
+    label(hwnd, L"上机状态:", S(1168), S(11), S(72), S(22));
+    st->machineStatus = search::create_combo(hwnd, IDC_MACHINE_STATUS, S(1244), S(8), S(120), S(160), false);
 
     st->notCanceled = CreateWindowExW(0, L"BUTTON", L"未取消签收", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                       S(10), S(42), S(98), S(24), hwnd, win32_control_id(IDC_NOT_CANCELED), GetModuleHandleW(nullptr), nullptr);
@@ -444,8 +456,8 @@ void createControls(HWND hwnd, BarcodeState* st) {
     st->status = leftLabel(hwnd, L"", S(8), S(546), S(900), S(24));
 
     fillStaticCombos(st);
-    setToday(st->startDate);
-    setToday(st->endDate);
+    setToday(st->startDate, false);
+    setToday(st->endDate, true);
     loadRooms(st);
     search::apply_font_to_children(hwnd, st->ctx.uiFont);
 }
@@ -493,6 +505,8 @@ void insertRow(HWND list, int index, const search::BarcodeQueryRow& row) {
         &row.receive_time,
         &row.order_text,
         &row.sample_name,
+        &row.tester,
+        &row.reviewer,
         &row.fee,
         &row.request_doctor,
         &row.status,
@@ -528,18 +542,20 @@ const std::string& barcodeSortValue(const search::BarcodeQueryRow& row, int col)
         case 11: return row.receive_time;
         case 12: return row.order_text;
         case 13: return row.sample_name;
-        case 14: return row.fee;
-        case 15: return row.request_doctor;
-        case 16: return row.status;
-        case 17: return row.note;
-        case 18: return row.reason;
-        case 19: return row.submitter;
-        case 20: return row.submit_time;
-        case 21: return row.request_time;
-        case 22: return row.cancel_time;
-        case 23: return row.cancel_operator;
-        case 24: return row.hzid;
-        case 25: return row.machine_status;
+        case 14: return row.tester;
+        case 15: return row.reviewer;
+        case 16: return row.fee;
+        case 17: return row.request_doctor;
+        case 18: return row.status;
+        case 19: return row.note;
+        case 20: return row.reason;
+        case 21: return row.submitter;
+        case 22: return row.submit_time;
+        case 23: return row.request_time;
+        case 24: return row.cancel_time;
+        case 25: return row.cancel_operator;
+        case 26: return row.hzid;
+        case 27: return row.machine_status;
         default: return empty;
     }
 }
@@ -557,7 +573,7 @@ int compareBarcodeSortValue(const search::BarcodeQueryRow& a,
                             int col) {
     const std::string left = search::trim(barcodeSortValue(a, col));
     const std::string right = search::trim(barcodeSortValue(b, col));
-    if (col == 14) {
+    if (col == 16) {
         double ln = 0.0, rn = 0.0;
         const bool lok = parseDouble(left, ln);
         const bool rok = parseDouble(right, rn);

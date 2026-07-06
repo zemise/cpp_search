@@ -241,6 +241,8 @@ struct BarcodeQueryRow {
     std::string receive_time;    // 签收时间
     std::string order_text;      // 医嘱内容
     std::string sample_name;     // 标本
+    std::string tester;          // 检验者
+    std::string reviewer;        // 审核者
     std::string fee;             // 费用
     std::string request_doctor;  // 申请医生
     std::string status;          // 状态

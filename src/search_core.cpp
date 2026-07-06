@@ -2050,7 +2050,7 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         where << " AND " << date_col << " >= '" << sql_escape(trim(filters.start_date)) << "'";
     }
     if (!trim(filters.end_date).empty()) {
-        where << " AND " << date_col << " < DATEADD(day,1,'" << sql_escape(trim(filters.end_date)) << "')";
+        where << " AND " << date_col << " < DATEADD(minute,1,'" << sql_escape(trim(filters.end_date)) << "')";
     }
     add_like(where, "b.BARCODE", filters.barcode);
     add_like(where, "b.NAME", filters.patient_name);
@@ -2076,6 +2076,8 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         << "isnull(CONVERT(varchar(19),b.IN_DATE,120),'') AS receive_time,"
         << "isnull(LTRIM(RTRIM(b.ORDER_TEXT)),'') AS order_text,"
         << "isnull(LTRIM(RTRIM(b.SAMP_NAME)),'') AS sample_name,"
+        << "isnull(LTRIM(RTRIM(rd.TESTER_NAME)),'') AS tester_name,"
+        << "isnull(LTRIM(RTRIM(rd.REVIEWER_NAME)),'') AS reviewer_name,"
         << "isnull(LTRIM(RTRIM(CONVERT(varchar(32),b.FY))),'') AS fee,"
         << "isnull(LTRIM(RTRIM(b.REQ_DRN)),'') AS request_doctor,"
         << "isnull(CONVERT(varchar(10),b.ZT_FLAG),'') AS status,"
@@ -2102,10 +2104,13 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         << " WHERE isnull(r.DELETE_BIT,0)=0"
         << " AND r.TXM_NO=b.BARCODE) rs"
         << " OUTER APPLY (SELECT TOP 1"
-        << " r.REP_NO,r.OPER_NO,r.CHK_DATE,r.MACH_CODE,r.ROOM_CODE,mach.MACH_NAME"
+        << " r.REP_NO,r.OPER_NO,r.CHK_DATE,r.MACH_CODE,r.ROOM_CODE,mach.MACH_NAME,"
+        << " emp_oper.NAME AS TESTER_NAME,emp_rep.NAME AS REVIEWER_NAME"
         << " FROM LS_AS_REPORT r WITH (NOLOCK)"
         << " LEFT JOIN LS_AS_MACHINE mach WITH (NOLOCK)"
         << " ON r.MACH_CODE=mach.MACH_CODE AND r.ROOM_CODE=mach.ROOM_CODE AND mach.DELETE_BIT=0"
+        << " LEFT JOIN JC_EMPLOYEE_PROPERTY emp_oper WITH (NOLOCK) ON r.OPER_CODE=emp_oper.EMPLOYEE_ID"
+        << " LEFT JOIN JC_EMPLOYEE_PROPERTY emp_rep WITH (NOLOCK) ON r.REP_OPER=emp_rep.EMPLOYEE_ID"
         << " WHERE isnull(r.DELETE_BIT,0)=0"
         << " AND r.TXM_NO=b.BARCODE"
         << " AND NULLIF(LTRIM(RTRIM(CONVERT(varchar(30),r.REP_NO))),'') IS NOT NULL"
@@ -2133,23 +2138,25 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         row.receive_time   = fetch_column(stmt, 11);
         row.order_text     = fetch_column(stmt, 12);
         row.sample_name    = fetch_column(stmt, 13);
-        row.fee            = fetch_column(stmt, 14);
-        row.request_doctor = fetch_column(stmt, 15);
-        row.status         = fetch_column(stmt, 16);
-        row.note           = fetch_column(stmt, 17);
-        row.reason         = fetch_column(stmt, 18);
-        row.submitter      = fetch_column(stmt, 19);
-        row.submit_time    = fetch_column(stmt, 20);
-        row.request_time   = fetch_column(stmt, 21);
-        row.cancel_time    = fetch_column(stmt, 22);
-        row.cancel_operator = fetch_column(stmt, 23);
-        row.hzid           = fetch_column(stmt, 24);
-        row.machine_status = fetch_column(stmt, 25);
-        row.report_no      = fetch_column(stmt, 26);
-        row.machine_code   = fetch_column(stmt, 27);
-        row.machine_name   = fetch_column(stmt, 28);
-        row.room_code      = fetch_column(stmt, 29);
-        row.inspect_date   = fetch_column(stmt, 30);
+        row.tester         = fetch_column(stmt, 14);
+        row.reviewer       = fetch_column(stmt, 15);
+        row.fee            = fetch_column(stmt, 16);
+        row.request_doctor = fetch_column(stmt, 17);
+        row.status         = fetch_column(stmt, 18);
+        row.note           = fetch_column(stmt, 19);
+        row.reason         = fetch_column(stmt, 20);
+        row.submitter      = fetch_column(stmt, 21);
+        row.submit_time    = fetch_column(stmt, 22);
+        row.request_time   = fetch_column(stmt, 23);
+        row.cancel_time    = fetch_column(stmt, 24);
+        row.cancel_operator = fetch_column(stmt, 25);
+        row.hzid           = fetch_column(stmt, 26);
+        row.machine_status = fetch_column(stmt, 27);
+        row.report_no      = fetch_column(stmt, 28);
+        row.machine_code   = fetch_column(stmt, 29);
+        row.machine_name   = fetch_column(stmt, 30);
+        row.room_code      = fetch_column(stmt, 31);
+        row.inspect_date   = fetch_column(stmt, 32);
         rows.push_back(row);
     }
 
