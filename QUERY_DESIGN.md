@@ -269,6 +269,8 @@ HIV 统计表导出：
 
 日期类型下拉框按 `申请日期 / 签收日期 / 上机日期` 展示，默认选中 `签收日期`；开始和结束控件使用日期时间选择器，默认当天 `00:00` 至 `23:59`，查询结束条件按 `< DATEADD(minute,1,结束时间)` 处理。条形码、姓名和病人号输入框按回车会直接触发同一查询路径。
 
+`专业组` 和 `上机状态` 使用原生 ComboBox 主题外观的下拉按钮，弹出层使用 `ListView + LVS_EX_CHECKBOXES` 实现多选。第一项 `全部` 是批量开关：点击后勾选当前下拉中所有具体项，再次点击则取消所有具体项；没有勾选具体项或已勾选全部具体项时，查询都按“不限定该条件”处理。下拉弹窗会按当前显示器工作区自动向下或向上展开，避免靠近屏幕边缘时被截断；按钮支持鼠标点击、`F4` 和 `Alt+↓` 打开。需要查询未完成检验时，直接在主 `上机状态` 下拉中勾选 `已签收未上机 / 已上机未审核 / 已审核未发送`，该组合摘要显示为 `未完成检验`；同时可用主 `专业组` 下拉多选限定专业组。确认查询后，结果仍回填当前 ListView，并继续复用表头排序、右键复制、导出 CSV 和双击跳转常规报告。检验者、审核者仅作为列表显示列，不作为筛选条件。
+
 结果列表支持点击除首个空白列外的表头进行本地升降序排序，只重排当前已加载的 `BarcodeQueryRow` 内存数据，不重新访问数据库；费用列按数值比较，其余列按文本比较，排序前会记录当前选中行，重绘后再恢复选中并滚动到可见位置。页面不再提供独立排序下拉框，数据库初始返回顺序固定为签收时间升序；用户点过表头后，后续查询结果会继续按当前表头排序展示。结果列表也支持右键复制当前业务单元格，首个空白占位列不弹出复制菜单。
 
 结果列表双击行会复用常规报告的 `RegularReportOpenTarget + WM_REGULAR_OPEN_REPORT` 机制，携带同条码最近有效报告的 `REP_NO / OPER_NO / MACH_CODE / MACH_NAME / ROOM_CODE / CHK_DATE` 跳转到 `常规报告` 并定位目标报告；未匹配到有效报告、仪器或检验日期时不跳转并提示该条码为已签收未上机。
@@ -285,7 +287,8 @@ HIV 统计表导出：
 | 条形码 | `LS_AS_BARCODE.BARCODE LIKE` |
 | 姓名 | `LS_AS_BARCODE.NAME LIKE` |
 | 病人号 | `LS_AS_BARCODE.REG_NO LIKE` |
-| 专业组 | `LS_AS_BARCODE.ROOM_CODE`，下拉来源 `LS_AS_ROOM` |
+| 专业组 | 多选下拉来源 `LS_AS_ROOM`；选择具体项时使用 `LS_AS_BARCODE.ROOM_CODE IN (...)`，选择 `全部` 时不追加专业组条件 |
+| 上机状态 | 多选下拉；选择具体项时由报告链路派生状态后按所选状态组合过滤，选择 `全部` 时不追加上机状态条件 |
 | 未取消签收 | `LS_AS_BARCODE.CANCEL_DATE IS NULL` |
 | 取消签收 | `LS_AS_BARCODE.CANCEL_DATE IS NOT NULL` |
 | 已签收未上机 | 未匹配到有效 `LS_AS_REPORT.REP_NO`，`LS_AS_REPORT.CHK_FLAG<>'T'`，`LS_AS_REPORT.CONF<>'S'`，且 `LS_AS_BARCODE.OPER_STATE=0` |
@@ -310,12 +313,12 @@ HIV 统计表导出：
 | 性别 | `LS_AS_BARCODE.SEX` |
 | 申请科室 | 优先 `LS_AS_BARCODE.DEPT_NAME`；需要从代码补全时，根据 `TYPE / TYPENAME` 区分门诊/住院后，用 `DEPT_CODE` 对应 `JC_dept_mz_zy.mzksid / zyksid` 取得 `mzksmc / zyksmc` |
 | 床号 | `LS_AS_BARCODE.BEDNO` |
-| 签收人 | `LS_AS_BARCODE.OPER_CODE` |
+| 签收人 | `LS_AS_BARCODE.OPER_CODE`，按签收人显示值/姓名处理，不等同于报告表人员代码 |
 | 签收时间 | `LS_AS_BARCODE.IN_DATE` |
 | 医嘱内容 | `LS_AS_BARCODE.ORDER_TEXT` |
 | 标本 | `LS_AS_BARCODE.SAMP_NAME` |
-| 检验者 | 最近有效报告 `LS_AS_REPORT.OPER_CODE = JC_EMPLOYEE_PROPERTY.EMPLOYEE_ID`，显示 `JC_EMPLOYEE_PROPERTY.NAME` |
-| 审核者 | 最近有效报告 `LS_AS_REPORT.REP_OPER = JC_EMPLOYEE_PROPERTY.EMPLOYEE_ID`，显示 `JC_EMPLOYEE_PROPERTY.NAME` |
+| 检验者 | 最近有效报告 `LS_AS_REPORT.OPER_CODE = JC_EMPLOYEE_PROPERTY.EMPLOYEE_ID`，优先显示 `JC_EMPLOYEE_PROPERTY.NAME`，字典缺失时回退显示原值 |
+| 审核者 | 最近有效报告 `LS_AS_REPORT.REP_OPER = JC_EMPLOYEE_PROPERTY.EMPLOYEE_ID`，优先显示 `JC_EMPLOYEE_PROPERTY.NAME`，字典缺失时回退显示原值 |
 | 费用 | `LS_AS_BARCODE.FY` |
 | 申请医生 | `LS_AS_BARCODE.REQ_DRN` |
 | 状态 | `LS_AS_BARCODE.ZT_FLAG` |

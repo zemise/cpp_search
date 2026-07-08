@@ -12,6 +12,8 @@
 #include "win32_control_id.h"
 
 #include <commctrl.h>
+#include <uxtheme.h>
+#include <vssym32.h>
 #include <windows.h>
 #include <windowsx.h>
 
@@ -29,6 +31,7 @@ namespace {
 
 constexpr const wchar_t* WND_CLASS = L"BarcodeModuleChild";
 constexpr const wchar_t* LEGEND_CLASS = L"BarcodeStatusLegend";
+constexpr const wchar_t* CHECK_DROPDOWN_CLASS = L"BarcodeCheckDropdown";
 constexpr const wchar_t* WINDOW_TITLE = L"已签收条码查询";
 constexpr const wchar_t* PROP_STATE = L"BarcodeSt";
 constexpr UINT WM_BARCODE_LOADED = WM_APP + 501;
@@ -51,6 +54,7 @@ constexpr int IDC_CANCEL_REASON = 4116;
 constexpr int IDC_EXPORT = 4118;
 constexpr int IDC_LIST = 4120;
 constexpr int IDC_STATUS = 4121;
+constexpr int IDC_DROPDOWN_LIST = 4510;
 constexpr int FIRST_DATA_COLUMN = 1;
 constexpr int LAST_DATA_COLUMN = 27;
 constexpr UINT IDM_COPY_CELL = 41201;
@@ -83,6 +87,10 @@ struct BarcodeState {
     HBRUSH bgBrush = nullptr;
     std::vector<search::RoomOption> rooms;
     std::vector<search::BarcodeQueryRow> rows;
+    std::vector<std::string> selectedRoomCodes;
+    std::vector<std::string> selectedMachineStatuses;
+    bool roomDropdownOpen = false;
+    bool statusDropdownOpen = false;
     int listSortColumn = -1;
     bool listSortAscending = true;
     std::thread bgThread;
@@ -184,15 +192,9 @@ void fillStaticCombos(BarcodeState* st) {
     addComboItem(st->dateField, L"签收日期");
     addComboItem(st->dateField, L"上机日期");
     SendMessageW(st->dateField, CB_SETCURSEL, 1, 0);
-
-    const wchar_t* statuses[] = {L"全部", L"已签收未上机", L"已上机未审核", L"已审核未发送", L"发送完成"};
-    for (const auto* text : statuses) addComboItem(st->machineStatus, text);
-    SendMessageW(st->machineStatus, CB_SETCURSEL, 2, 0);
 }
 
 void loadRooms(BarcodeState* st) {
-    SendMessageW(st->room, CB_RESETCONTENT, 0, 0);
-    addComboItem(st->room, L"全部");
     st->rooms.clear();
 
     const auto conn = search::wide_to_utf8(search::build_connection_string_w(st->ctx.dbSettings));
@@ -200,12 +202,6 @@ void loadRooms(BarcodeState* st) {
         std::string error;
         search::query_rooms(conn, st->rooms, error);
     }
-
-    for (size_t i = 0; i < st->rooms.size(); ++i) {
-        const auto label = search::utf8_to_wide(st->rooms[i].room_name);
-        SendMessageW(st->room, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
-    }
-    SendMessageW(st->room, CB_SETCURSEL, 0, 0);
 }
 
 HWND label(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
@@ -220,6 +216,11 @@ HWND leftLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
 
 HWND button(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h) {
     return CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                           x, y, w, h, parent, win32_control_id(id), GetModuleHandleW(nullptr), nullptr);
+}
+
+HWND dropdownButton(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h) {
+    return CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                            x, y, w, h, parent, win32_control_id(id), GetModuleHandleW(nullptr), nullptr);
 }
 
@@ -386,7 +387,7 @@ bool copyTextToClipboard(HWND owner, const std::wstring& text) {
 }
 
 LRESULT CALLBACK searchEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-                                UINT_PTR subclassId, DWORD_PTR refData) {
+                                 UINT_PTR subclassId, DWORD_PTR refData) {
     if (msg == WM_GETDLGCODE) {
         return DefSubclassProc(hwnd, msg, wp, lp) | DLGC_WANTALLKEYS;
     }
@@ -401,6 +402,421 @@ LRESULT CALLBACK searchEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
+LRESULT CALLBACK dropdownButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                    UINT_PTR subclassId, DWORD_PTR refData) {
+    if (msg == WM_KEYDOWN &&
+        (wp == VK_F4 || (wp == VK_DOWN && (GetKeyState(VK_MENU) & 0x8000)))) {
+        HWND parent = reinterpret_cast<HWND>(refData);
+        SendMessageW(parent, WM_COMMAND,
+                     MAKEWPARAM(GetDlgCtrlID(hwnd), BN_CLICKED),
+                     reinterpret_cast<LPARAM>(hwnd));
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, dropdownButtonProc, subclassId);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+struct CheckDropdownItem {
+    std::string code;
+    std::wstring text;
+};
+
+struct CheckDropdownState {
+    HWND list = nullptr;
+    std::vector<CheckDropdownItem> items;
+    std::vector<std::string> selected;
+    bool adjusting = false;
+    bool closeRequested = false;
+};
+
+bool containsValue(const std::vector<std::string>& values, const std::string& value) {
+    const std::string target = search::trim(value);
+    return std::any_of(values.begin(), values.end(), [&](const std::string& item) {
+        return search::trim(item) == target;
+    });
+}
+
+void addDropdownItem(HWND list, int index, const std::wstring& text) {
+    LVITEMW item{};
+    item.mask = LVIF_TEXT;
+    item.iItem = index;
+    item.pszText = const_cast<wchar_t*>(text.c_str());
+    ListView_InsertItem(list, &item);
+}
+
+std::vector<std::string> checkedDropdownValues(CheckDropdownState* ds) {
+    std::vector<std::string> values;
+    if (!ds || !ds->list) return values;
+    const int count = ListView_GetItemCount(ds->list);
+    for (int i = 1; i < count && i < static_cast<int>(ds->items.size()); ++i) {
+        if (ListView_GetCheckState(ds->list, i)) {
+            values.push_back(ds->items[static_cast<size_t>(i)].code);
+        }
+    }
+    return values;
+}
+
+bool allSpecificDropdownItemsChecked(CheckDropdownState* ds) {
+    if (!ds || !ds->list) return false;
+    const int count = ListView_GetItemCount(ds->list);
+    if (count <= 1) return false;
+    for (int i = 1; i < count; ++i) {
+        if (!ListView_GetCheckState(ds->list, i)) return false;
+    }
+    return true;
+}
+
+void normalizeDropdownChecks(CheckDropdownState* ds, int changedIndex) {
+    if (!ds || !ds->list || ds->adjusting) return;
+    ds->adjusting = true;
+    const int count = ListView_GetItemCount(ds->list);
+    if (changedIndex == 0) {
+        const BOOL checkAll = ListView_GetCheckState(ds->list, 0);
+        for (int i = 1; i < count; ++i) {
+            ListView_SetCheckState(ds->list, i, checkAll ? TRUE : FALSE);
+        }
+    } else {
+        ListView_SetCheckState(ds->list, 0, allSpecificDropdownItemsChecked(ds) ? TRUE : FALSE);
+    }
+    ds->selected = checkedDropdownValues(ds);
+    ds->adjusting = false;
+}
+
+LRESULT CALLBACK dropdownListProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                  UINT_PTR subclassId, DWORD_PTR refData) {
+    if (msg == WM_KEYDOWN && (wp == VK_ESCAPE || wp == VK_RETURN)) {
+        HWND popup = reinterpret_cast<HWND>(refData);
+        if (auto* ds = reinterpret_cast<CheckDropdownState*>(GetWindowLongPtrW(popup, GWLP_USERDATA))) {
+            ds->closeRequested = true;
+        }
+        DestroyWindow(popup);
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, dropdownListProc, subclassId);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+LRESULT CALLBACK checkDropdownProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* ds = reinterpret_cast<CheckDropdownState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+        case WM_CREATE: {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+            ds = reinterpret_cast<CheckDropdownState*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ds));
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            ds->list = CreateWindowExW(0, WC_LISTVIEWW, L"",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL |
+                                           LVS_NOCOLUMNHEADER | LVS_SHOWSELALWAYS,
+                                       0, 0, rc.right, rc.bottom, hwnd,
+                                       win32_control_id(IDC_DROPDOWN_LIST), GetModuleHandleW(nullptr), nullptr);
+            SetWindowSubclass(ds->list, dropdownListProc, 1, reinterpret_cast<DWORD_PTR>(hwnd));
+            ListView_SetExtendedListViewStyle(ds->list, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+            search::add_list_column(ds->list, 0, L"", rc.right - 4);
+            ds->adjusting = true;
+            for (size_t i = 0; i < ds->items.size(); ++i) {
+                addDropdownItem(ds->list, static_cast<int>(i), ds->items[i].text);
+                const bool checked = i > 0 && containsValue(ds->selected, ds->items[i].code);
+                ListView_SetCheckState(ds->list, static_cast<int>(i), checked ? TRUE : FALSE);
+            }
+            ds->adjusting = false;
+            normalizeDropdownChecks(ds, -1);
+            return 0;
+        }
+        case WM_SIZE:
+            if (ds && ds->list) {
+                RECT rc{};
+                GetClientRect(hwnd, &rc);
+                MoveWindow(ds->list, 0, 0, rc.right, rc.bottom, TRUE);
+                ListView_SetColumnWidth(ds->list, 0, rc.right - 4);
+            }
+            return 0;
+        case WM_KEYDOWN:
+            if (wp == VK_ESCAPE || wp == VK_RETURN) {
+                if (ds) ds->closeRequested = true;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        case WM_NOTIFY:
+            if (ds) {
+                auto* nm = reinterpret_cast<NMHDR*>(lp);
+                if (nm->idFrom == IDC_DROPDOWN_LIST && nm->code == LVN_ITEMCHANGED) {
+                    auto* item = reinterpret_cast<NMLISTVIEW*>(lp);
+                    const UINT oldState = item->uOldState & LVIS_STATEIMAGEMASK;
+                    const UINT newState = item->uNewState & LVIS_STATEIMAGEMASK;
+                    if (oldState != newState) normalizeDropdownChecks(ds, item->iItem);
+                    return 0;
+                }
+                if (nm->idFrom == IDC_DROPDOWN_LIST && nm->code == NM_CLICK) {
+                    POINT pt{};
+                    GetCursorPos(&pt);
+                    ScreenToClient(ds->list, &pt);
+                    LVHITTESTINFO hit{};
+                    hit.pt = pt;
+                    const int row = ListView_HitTest(ds->list, &hit);
+                    if (row >= 0 && !(hit.flags & LVHT_ONITEMSTATEICON)) {
+                        const BOOL checked = ListView_GetCheckState(ds->list, row);
+                        ListView_SetCheckState(ds->list, row, checked ? FALSE : TRUE);
+                        normalizeDropdownChecks(ds, row);
+                    }
+                    return 0;
+                }
+            }
+            break;
+        case WM_ACTIVATE:
+            if (LOWORD(wp) == WA_INACTIVE) {
+                if (ds) ds->closeRequested = true;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        case WM_DESTROY:
+            if (ds) ds->closeRequested = true;
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void registerCheckDropdownClass(HINSTANCE instance) {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = checkDropdownProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = CHECK_DROPDOWN_CLASS;
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+void showCheckDropdown(HWND owner, HWND anchor, const std::vector<CheckDropdownItem>& items,
+                       std::vector<std::string>& selected, int minWidth, int visibleRows) {
+    if (!owner || !anchor || items.empty()) return;
+    registerCheckDropdownClass(GetModuleHandleW(nullptr));
+    CheckDropdownState ds;
+    ds.items = items;
+    ds.selected = selected;
+
+    RECT anchorRc{};
+    GetWindowRect(anchor, &anchorRc);
+    const float s = search::dpi_scale_factor(owner);
+    const int rowH = static_cast<int>(24 * s);
+    const int rows = (std::min)(visibleRows, (std::max)(1, static_cast<int>(items.size())));
+    const int anchorW = static_cast<int>(anchorRc.right - anchorRc.left);
+    int w = (std::max)(minWidth, anchorW);
+    int h = (std::max)(rowH * rows + static_cast<int>(6 * s), static_cast<int>(80 * s));
+
+    RECT workRc{};
+    HMONITOR monitor = MonitorFromRect(&anchorRc, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (monitor && GetMonitorInfoW(monitor, &mi)) {
+        workRc = mi.rcWork;
+    } else {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &workRc, 0);
+    }
+    const int workW = workRc.right - workRc.left;
+    const int workH = workRc.bottom - workRc.top;
+    if (workW > 0) w = (std::min)(w, workW);
+    if (workH > 0) h = (std::min)(h, workH);
+
+    int x = anchorRc.left;
+    if (x + w > workRc.right) x = workRc.right - w;
+    if (x < workRc.left) x = workRc.left;
+
+    int y = anchorRc.bottom;
+    const bool fitsBelow = y + h <= workRc.bottom;
+    const bool fitsAbove = anchorRc.top - h >= workRc.top;
+    if (!fitsBelow && fitsAbove) {
+        y = anchorRc.top - h;
+    } else if (!fitsBelow) {
+        y = (std::max)(workRc.top, workRc.bottom - h);
+    }
+
+    HWND popup = CreateWindowExW(WS_EX_TOOLWINDOW,
+                                 CHECK_DROPDOWN_CLASS, L"",
+                                 WS_POPUP | WS_BORDER,
+                                 x, y, w, h,
+                                 owner, nullptr, GetModuleHandleW(nullptr), &ds);
+    if (!popup) return;
+
+    ShowWindow(popup, SW_SHOW);
+    SetFocus(ds.list ? ds.list : popup);
+    MSG msg{};
+    BOOL gotMessage = TRUE;
+    while (IsWindow(popup) && !ds.closeRequested &&
+           (gotMessage = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
+        if (!IsDialogMessageW(popup, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    selected = ds.selected;
+    SetFocus(anchor);
+    if (gotMessage == 0) PostQuitMessage(static_cast<int>(msg.wParam));
+}
+
+const wchar_t* STATUS_LABELS[] = {
+    L"已签收未上机",
+    L"已上机未审核",
+    L"已审核未发送",
+    L"发送完成",
+};
+
+std::vector<CheckDropdownItem> roomDropdownItems(const BarcodeState* st) {
+    std::vector<CheckDropdownItem> items;
+    items.push_back({"", L"全部"});
+    if (!st) return items;
+    for (const auto& room : st->rooms) {
+        CheckDropdownItem item;
+        item.code = search::trim(room.room_code);
+        item.text = search::utf8_to_wide(search::trim(room.room_name));
+        if (item.text.empty()) item.text = search::utf8_to_wide(item.code);
+        if (!item.code.empty()) items.push_back(std::move(item));
+    }
+    return items;
+}
+
+std::vector<CheckDropdownItem> statusDropdownItems() {
+    std::vector<CheckDropdownItem> items;
+    items.push_back({"", L"全部"});
+    for (const auto* label : STATUS_LABELS) {
+        items.push_back({search::wide_to_utf8(label), label});
+    }
+    return items;
+}
+
+bool allRoomsSelected(const BarcodeState* st) {
+    return st && !st->rooms.empty() && st->selectedRoomCodes.size() == st->rooms.size();
+}
+
+bool allStatusesSelected(const BarcodeState* st) {
+    return st && st->selectedMachineStatuses.size() == (sizeof(STATUS_LABELS) / sizeof(STATUS_LABELS[0]));
+}
+
+std::wstring roomSummary(const BarcodeState* st) {
+    if (!st || st->selectedRoomCodes.empty()) return L"全部";
+    if (allRoomsSelected(st)) return L"全部";
+    if (st->selectedRoomCodes.size() == 1) {
+        const std::string code = search::trim(st->selectedRoomCodes.front());
+        for (const auto& room : st->rooms) {
+            if (search::trim(room.room_code) == code) {
+                return search::utf8_to_wide(search::trim(room.room_name));
+            }
+        }
+        return search::utf8_to_wide(code);
+    }
+    return L"已选 " + std::to_wstring(st->selectedRoomCodes.size()) + L" 个";
+}
+
+std::wstring statusSummary(const BarcodeState* st) {
+    if (!st || st->selectedMachineStatuses.empty()) return L"全部";
+    if (allStatusesSelected(st)) return L"全部";
+    if (st->selectedMachineStatuses.size() == 1) {
+        return search::utf8_to_wide(st->selectedMachineStatuses.front());
+    }
+    const bool unfinished =
+        st->selectedMachineStatuses.size() == 3 &&
+        containsValue(st->selectedMachineStatuses, "已签收未上机") &&
+        containsValue(st->selectedMachineStatuses, "已上机未审核") &&
+        containsValue(st->selectedMachineStatuses, "已审核未发送");
+    if (unfinished) return L"未完成检验";
+    return L"已选 " + std::to_wstring(st->selectedMachineStatuses.size()) + L" 项";
+}
+
+void updateFilterButtonText(BarcodeState* st, bool roomOpen = false, bool statusOpen = false) {
+    if (!st) return;
+    st->roomDropdownOpen = roomOpen;
+    st->statusDropdownOpen = statusOpen;
+    if (st->room) {
+        SetWindowTextW(st->room, roomSummary(st).c_str());
+        InvalidateRect(st->room, nullptr, TRUE);
+    }
+    if (st->machineStatus) {
+        SetWindowTextW(st->machineStatus, statusSummary(st).c_str());
+        InvalidateRect(st->machineStatus, nullptr, TRUE);
+    }
+}
+
+void drawDropdownButton(BarcodeState* st, DRAWITEMSTRUCT* dis) {
+    if (!st || !dis || !dis->hwndItem) return;
+    const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+    const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+    const bool focus = (dis->itemState & ODS_FOCUS) != 0;
+    const bool hot = (dis->itemState & ODS_HOTLIGHT) != 0;
+    const bool open =
+        (dis->CtlID == IDC_ROOM && st->roomDropdownOpen) ||
+        (dis->CtlID == IDC_MACHINE_STATUS && st->statusDropdownOpen);
+
+    RECT rc = dis->rcItem;
+    const float s = search::dpi_scale_factor(dis->hwndItem);
+    const int arrowW = static_cast<int>(22 * s);
+    RECT arrowRc = rc;
+    arrowRc.left = (std::max)(arrowRc.left, arrowRc.right - arrowW);
+
+    const int comboState = disabled ? CBXS_DISABLED :
+                           (pressed || open) ? CBXS_PRESSED :
+                           hot ? CBXS_HOT :
+                           CBXS_NORMAL;
+    HTHEME theme = OpenThemeData(dis->hwndItem, L"COMBOBOX");
+    if (theme) {
+        if (FAILED(DrawThemeBackground(theme, dis->hDC, CP_READONLY, comboState, &rc, nullptr))) {
+            DrawThemeBackground(theme, dis->hDC, CP_BORDER, comboState, &rc, nullptr);
+        }
+        if (FAILED(DrawThemeBackground(theme, dis->hDC, CP_DROPDOWNBUTTONRIGHT, comboState, &arrowRc, nullptr))) {
+            DrawThemeBackground(theme, dis->hDC, CP_DROPDOWNBUTTON, comboState, &arrowRc, nullptr);
+        }
+        CloseThemeData(theme);
+    } else {
+        FillRect(dis->hDC, &rc, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+        DrawEdge(dis->hDC, &rc, pressed ? EDGE_SUNKEN : EDGE_RAISED, BF_RECT);
+        RECT fallbackArrow = arrowRc;
+        InflateRect(&fallbackArrow, -2, -2);
+        DrawFrameControl(dis->hDC, &fallbackArrow, DFC_SCROLL, DFCS_SCROLLDOWN);
+    }
+
+    RECT textRc = rc;
+    textRc.left += static_cast<int>(6 * s);
+    textRc.right = (std::max)(textRc.left, rc.right - arrowW - static_cast<int>(4 * s));
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, disabled ? GetSysColor(COLOR_GRAYTEXT) : GetSysColor(COLOR_WINDOWTEXT));
+    HGDIOBJ oldFont = nullptr;
+    if (st->ctx.uiFont) oldFont = SelectObject(dis->hDC, st->ctx.uiFont);
+    wchar_t text[256]{};
+    GetWindowTextW(dis->hwndItem, text, 256);
+    DrawTextW(dis->hDC, text, -1, &textRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    if (oldFont) SelectObject(dis->hDC, oldFont);
+    if (focus) {
+        RECT focusRc = rc;
+        InflateRect(&focusRc, -3, -3);
+        DrawFocusRect(dis->hDC, &focusRc);
+    }
+}
+
+void openRoomDropdown(HWND hwnd, BarcodeState* st) {
+    if (!st) return;
+    const float s = search::dpi_scale_factor(hwnd);
+    updateFilterButtonText(st, true, false);
+    showCheckDropdown(hwnd, st->room, roomDropdownItems(st), st->selectedRoomCodes,
+                      static_cast<int>(220 * s), 10);
+    updateFilterButtonText(st);
+}
+
+void openStatusDropdown(HWND hwnd, BarcodeState* st) {
+    if (!st) return;
+    const float s = search::dpi_scale_factor(hwnd);
+    updateFilterButtonText(st, false, true);
+    showCheckDropdown(hwnd, st->machineStatus, statusDropdownItems(), st->selectedMachineStatuses,
+                      static_cast<int>(180 * s), 6);
+    updateFilterButtonText(st);
+}
+
 void createControls(HWND hwnd, BarcodeState* st) {
     const float s = search::dpi_scale_factor(hwnd);
     auto S = [s](int v) { return static_cast<int>(v * s); };
@@ -410,19 +826,21 @@ void createControls(HWND hwnd, BarcodeState* st) {
     st->startDate = dateTimePicker(hwnd, IDC_START_DATE, S(104), S(8), S(160), S(24));
     label(hwnd, L"至", S(268), S(11), S(20), S(22));
     st->endDate = dateTimePicker(hwnd, IDC_END_DATE, S(292), S(8), S(160), S(24));
-    label(hwnd, L"条形码:", S(456), S(11), S(58), S(22));
+    label(hwnd, L"条形码", S(456), S(11), S(58), S(22));
     st->barcode = search::create_edit(hwnd, IDC_BARCODE, S(518), S(8), S(140), S(24));
     SetWindowSubclass(st->barcode, searchEditProc, 1, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"姓  名:", S(662), S(11), S(58), S(22));
+    label(hwnd, L"姓  名", S(662), S(11), S(58), S(22));
     st->name = search::create_edit(hwnd, IDC_NAME, S(724), S(8), S(96), S(24));
     SetWindowSubclass(st->name, searchEditProc, 2, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"病人号:", S(824), S(11), S(58), S(22));
+    label(hwnd, L"病人号", S(824), S(11), S(58), S(22));
     st->regNo = search::create_edit(hwnd, IDC_REG_NO, S(886), S(8), S(124), S(24));
     SetWindowSubclass(st->regNo, searchEditProc, 3, reinterpret_cast<DWORD_PTR>(hwnd));
     label(hwnd, L"专业组", S(1014), S(11), S(46), S(22));
-    st->room = search::create_combo(hwnd, IDC_ROOM, S(1064), S(8), S(100), S(160), false);
-    label(hwnd, L"上机状态:", S(1168), S(11), S(72), S(22));
-    st->machineStatus = search::create_combo(hwnd, IDC_MACHINE_STATUS, S(1244), S(8), S(120), S(160), false);
+    st->room = dropdownButton(hwnd, IDC_ROOM, L"全部", S(1064), S(8), S(120), S(24));
+    SetWindowSubclass(st->room, dropdownButtonProc, 1, reinterpret_cast<DWORD_PTR>(hwnd));
+    label(hwnd, L"上机状态", S(1188), S(11), S(72), S(22));
+    st->machineStatus = dropdownButton(hwnd, IDC_MACHINE_STATUS, L"全部", S(1264), S(8), S(150), S(24));
+    SetWindowSubclass(st->machineStatus, dropdownButtonProc, 2, reinterpret_cast<DWORD_PTR>(hwnd));
 
     st->notCanceled = CreateWindowExW(0, L"BUTTON", L"未取消签收", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
                                       S(10), S(42), S(98), S(24), hwnd, win32_control_id(IDC_NOT_CANCELED), GetModuleHandleW(nullptr), nullptr);
@@ -442,7 +860,7 @@ void createControls(HWND hwnd, BarcodeState* st) {
     EnableWindow(st->exportExcel, FALSE);
 
     st->legend = CreateWindowExW(0, LEGEND_CLASS, L"", WS_CHILD | WS_VISIBLE,
-                                 S(770), S(52), S(460), S(24), hwnd, nullptr,
+                                 S(882), S(52), S(460), S(24), hwnd, nullptr,
                                  GetModuleHandleW(nullptr), nullptr);
 
     st->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -459,6 +877,8 @@ void createControls(HWND hwnd, BarcodeState* st) {
     setToday(st->startDate, false);
     setToday(st->endDate, true);
     loadRooms(st);
+    st->selectedMachineStatuses = {"已上机未审核"};
+    updateFilterButtonText(st);
     search::apply_font_to_children(hwnd, st->ctx.uiFont);
 }
 
@@ -720,12 +1140,13 @@ search::BarcodeQueryFilters collectFilters(BarcodeState* st) {
     f.barcode = textOf(st->barcode);
     f.patient_name = textOf(st->name);
     f.reg_no = textOf(st->regNo);
-    f.machine_status = comboText(st->machineStatus);
+    if (!allStatusesSelected(st)) {
+        f.machine_statuses = st->selectedMachineStatuses;
+    }
+    if (f.machine_statuses.empty()) f.machine_status = "全部";
     f.canceled = Button_GetCheck(st->canceled) == BST_CHECKED;
-
-    const int roomIdx = static_cast<int>(SendMessageW(st->room, CB_GETCURSEL, 0, 0));
-    if (roomIdx > 0 && static_cast<size_t>(roomIdx - 1) < st->rooms.size()) {
-        f.room_code = st->rooms[static_cast<size_t>(roomIdx - 1)].room_code;
+    if (!allRoomsSelected(st)) {
+        f.room_codes = st->selectedRoomCodes;
     }
 
     return f;
@@ -765,7 +1186,9 @@ void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult
     sortBarcodeRowsForDisplay(st);
     presentRows(st);
     updateExportButton(st);
-    setStatus(st, L"查询完成，共 " + std::to_wstring(st->rows.size()) + L" 条。");
+    setStatus(st, L"查询完成：专业组 " + roomSummary(st) +
+              L"，上机状态 " + statusSummary(st) +
+              L"，共 " + std::to_wstring(st->rows.size()) + L" 条。");
 }
 
 void exportRowsCsv(HWND hwnd, BarcodeState* st) {
@@ -848,9 +1271,24 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (st->legend) InvalidateRect(st->legend, nullptr, TRUE);
             }
             return 0;
+        case WM_DRAWITEM:
+            if (st) {
+                auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+                if (dis && (dis->CtlID == IDC_ROOM || dis->CtlID == IDC_MACHINE_STATUS)) {
+                    drawDropdownButton(st, dis);
+                    return TRUE;
+                }
+            }
+            break;
         case WM_COMMAND:
             if (!st) break;
             switch (LOWORD(wp)) {
+                case IDC_ROOM:
+                    openRoomDropdown(hwnd, st);
+                    return 0;
+                case IDC_MACHINE_STATUS:
+                    openStatusDropdown(hwnd, st);
+                    return 0;
                 case IDC_QUERY:
                 case IDC_REFRESH:
                     runQuery(hwnd, st);

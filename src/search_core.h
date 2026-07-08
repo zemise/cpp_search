@@ -272,6 +272,8 @@ struct BarcodeQueryFilters {
     std::string reg_no;
     std::string machine_status;  // 全部/已签收未上机/已上机未审核/已审核未发送/发送完成
     std::string room_code;
+    std::vector<std::string> machine_statuses;
+    std::vector<std::string> room_codes;
     bool canceled = false;       // true: CANCEL_DATE IS NOT NULL; false: CANCEL_DATE IS NULL
 };
 

@@ -665,6 +665,13 @@ void add_like(std::ostringstream& sql, const char* col, const std::string& value
     }
 }
 
+void add_in(std::ostringstream& sql, const char* col, const std::vector<std::string>& values) {
+    const std::string list = sql_string_list(values);
+    if (!list.empty()) {
+        sql << " AND " << col << " IN (" << list << ")";
+    }
+}
+
 void add_report_status(std::ostringstream& sql, const std::string& value) {
     const auto status = trim(value);
     if (status.empty() || status == "全部") {
@@ -719,26 +726,49 @@ void add_blood_apply_status(std::ostringstream& sql, const std::string& value) {
     sql << " AND LTRIM(RTRIM(a.ApplyForm_Statue))='" << sql_escape(status) << "'";
 }
 
-void add_barcode_machine_status(std::ostringstream& sql, const std::string& value) {
+std::string barcode_machine_status_condition(const std::string& value) {
     const auto status = trim(value);
     if (status.empty() || status == "全部") {
-        return;
+        return {};
     }
     if (status == "已签收未上机") {
-        sql << " AND isnull(rs.REPORT_SENT,0)=0"
-            << " AND isnull(rs.REPORT_REVIEWED,0)=0"
-            << " AND isnull(rs.HAS_REPORT,0)=0"
-            << " AND isnull(b.OPER_STATE,0)=0";
+        return "isnull(rs.REPORT_SENT,0)=0"
+               " AND isnull(rs.REPORT_REVIEWED,0)=0"
+               " AND isnull(rs.HAS_REPORT,0)=0"
+               " AND isnull(b.OPER_STATE,0)=0";
     } else if (status == "已上机未审核") {
-        sql << " AND isnull(rs.REPORT_SENT,0)=0"
-            << " AND isnull(rs.REPORT_REVIEWED,0)=0"
-            << " AND (isnull(rs.HAS_REPORT,0)=1 OR isnull(b.OPER_STATE,0)>=1)";
+        return "isnull(rs.REPORT_SENT,0)=0"
+               " AND isnull(rs.REPORT_REVIEWED,0)=0"
+               " AND (isnull(rs.HAS_REPORT,0)=1 OR isnull(b.OPER_STATE,0)>=1)";
     } else if (status == "已审核未发送") {
-        sql << " AND isnull(rs.REPORT_SENT,0)=0"
-            << " AND isnull(rs.REPORT_REVIEWED,0)=1";
+        return "isnull(rs.REPORT_SENT,0)=0"
+               " AND isnull(rs.REPORT_REVIEWED,0)=1";
     } else if (status == "发送完成") {
-        sql << " AND isnull(rs.REPORT_SENT,0)=1";
+        return "isnull(rs.REPORT_SENT,0)=1";
     }
+    return {};
+}
+
+void add_barcode_machine_status(std::ostringstream& sql, const std::string& value) {
+    const auto condition = barcode_machine_status_condition(value);
+    if (!condition.empty()) {
+        sql << " AND " << condition;
+    }
+}
+
+void add_barcode_machine_statuses(std::ostringstream& sql, const std::vector<std::string>& values) {
+    std::vector<std::string> conditions;
+    for (const auto& value : values) {
+        auto condition = barcode_machine_status_condition(value);
+        if (!condition.empty()) conditions.push_back(std::move(condition));
+    }
+    if (conditions.empty()) return;
+    sql << " AND (";
+    for (size_t i = 0; i < conditions.size(); ++i) {
+        if (i > 0) sql << " OR ";
+        sql << "(" << conditions[i] << ")";
+    }
+    sql << ")";
 }
 
 const char* barcode_machine_status_sql() {
@@ -2056,8 +2086,13 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
     add_like(where, "b.NAME", filters.patient_name);
     add_like(where, "b.REG_NO", filters.reg_no);
     add_eq(where, "CONVERT(varchar(20),b.ROOM_CODE)", filters.room_code);
+    add_in(where, "CONVERT(varchar(20),b.ROOM_CODE)", filters.room_codes);
 
-    add_barcode_machine_status(where, filters.machine_status);
+    if (!filters.machine_statuses.empty()) {
+        add_barcode_machine_statuses(where, filters.machine_statuses);
+    } else {
+        add_barcode_machine_status(where, filters.machine_status);
+    }
 
     const std::string order_expr = "b.IN_DATE ASC,b.ID ASC";
 
@@ -2105,12 +2140,16 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         << " AND r.TXM_NO=b.BARCODE) rs"
         << " OUTER APPLY (SELECT TOP 1"
         << " r.REP_NO,r.OPER_NO,r.CHK_DATE,r.MACH_CODE,r.ROOM_CODE,mach.MACH_NAME,"
-        << " emp_oper.NAME AS TESTER_NAME,emp_rep.NAME AS REVIEWER_NAME"
+        << " r.OPER_CODE,r.REP_OPER,"
+        << " isnull(NULLIF(LTRIM(RTRIM(emp_oper.NAME)),''),LTRIM(RTRIM(CONVERT(varchar(50),r.OPER_CODE)))) AS TESTER_NAME,"
+        << " isnull(NULLIF(LTRIM(RTRIM(emp_rep.NAME)),''),LTRIM(RTRIM(CONVERT(varchar(50),r.REP_OPER)))) AS REVIEWER_NAME"
         << " FROM LS_AS_REPORT r WITH (NOLOCK)"
         << " LEFT JOIN LS_AS_MACHINE mach WITH (NOLOCK)"
         << " ON r.MACH_CODE=mach.MACH_CODE AND r.ROOM_CODE=mach.ROOM_CODE AND mach.DELETE_BIT=0"
-        << " LEFT JOIN JC_EMPLOYEE_PROPERTY emp_oper WITH (NOLOCK) ON r.OPER_CODE=emp_oper.EMPLOYEE_ID"
-        << " LEFT JOIN JC_EMPLOYEE_PROPERTY emp_rep WITH (NOLOCK) ON r.REP_OPER=emp_rep.EMPLOYEE_ID"
+        << " LEFT JOIN JC_EMPLOYEE_PROPERTY emp_oper WITH (NOLOCK)"
+        << " ON LTRIM(RTRIM(CONVERT(varchar(50),r.OPER_CODE)))=LTRIM(RTRIM(CONVERT(varchar(50),emp_oper.EMPLOYEE_ID)))"
+        << " LEFT JOIN JC_EMPLOYEE_PROPERTY emp_rep WITH (NOLOCK)"
+        << " ON LTRIM(RTRIM(CONVERT(varchar(50),r.REP_OPER)))=LTRIM(RTRIM(CONVERT(varchar(50),emp_rep.EMPLOYEE_ID)))"
         << " WHERE isnull(r.DELETE_BIT,0)=0"
         << " AND r.TXM_NO=b.BARCODE"
         << " AND NULLIF(LTRIM(RTRIM(CONVERT(varchar(30),r.REP_NO))),'') IS NOT NULL"
