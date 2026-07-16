@@ -72,7 +72,7 @@
 | 文件 | 职责 |
 |------|------|
 | `main.cpp` | Win32 入口、消息循环、窗口过程、全局状态（独立查询工具） |
-| `main_frame.cpp` | 主程序入口、g_modules[] 注册表、自动菜单/分发、主工具栏快捷入口、MDI 活动页与工具栏 active/关闭状态同步，以及 `系统 -> 检查更新` |
+| `main_frame.cpp` | 主程序入口、g_modules[] 菜单注册表、自动菜单/分发、主工具栏快捷入口、工具栏专用入口分发、MDI 活动页与工具栏 active/关闭状态同步，以及 `系统 -> 检查更新` |
 | `main_app.h` | 主程序全局上下文 |
 | `module_registry.h` | ModuleContext + ModuleDef 统一模块接口；MDI 子窗口按标题激活的单实例 helper |
 | `menu_toolbar.cpp/h` | 原生 Win32 自定义工具栏组件；GDI 双缓冲绘制浅色 command bar，支持 hover/pressed/active/disabled、右侧文字型关闭按钮和拉伸占位 |

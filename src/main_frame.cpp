@@ -267,11 +267,9 @@ const ModuleDef g_modules[] = {
     { L"Blood",    L"检验管理", L"输血结果查询(&B)...", IDM_BLOOD,    create_blood_module },
     { L"QualityControl", L"检验管理", L"质控分析(&C)", IDM_QCONTROL, create_quality_control_module },
     { L"Barcode",  L"工具",     L"已签收条码查询(&1)...", IDM_TOOL1,   create_barcode_module },
-    { L"RegularReport", L"工具", L"常规报告(&2)",       IDM_TOOL2,   create_regular_report_module },
-    { L"SpecimenSign", L"工具",  L"标本签收中心(&3)",   IDM_TOOL3,   create_specimen_sign_module },
-    { L"MchcCorrection", L"工具", L"脂血MCHC校正(&4)", IDM_TOOL4, create_mchc_correction_module },
-    { L"OutpatientQuery", L"工具", L"门诊查询(&5)", IDM_TOOL5, create_outpatient_query_module },
-    { L"PhoneDirectory", L"工具", L"常用电话(&6)",       IDM_TOOL6,   create_phone_directory_module },
+    { L"MchcCorrection", L"工具", L"脂血MCHC校正(&2)", IDM_TOOL4, create_mchc_correction_module },
+    { L"OutpatientQuery", L"工具", L"门诊查询(&3)", IDM_TOOL5, create_outpatient_query_module },
+    { L"PhoneDirectory", L"工具", L"常用电话(&4)",       IDM_TOOL6,   create_phone_directory_module },
     { L"HivStatistics", L"统计分析管理", L"HIV 抗体检测统计(&1)", IDM_STAT1, create_hiv_statistics_module },
     { L"EmergencyStatistics", L"统计分析管理", L"急诊样本统计(&2)", IDM_STAT2, create_emergency_statistics_module },
     { L"Stat4",    L"统计分析管理", L"统计分析4(&4)",    IDM_STAT4,   create_stat4_placeholder },
@@ -293,6 +291,21 @@ void updateStatusBarParts(HWND sb, int clientWidth) {
 ModuleContext makeCtx() {
     return { g_ctx.mdiClient, g_ctx.instance, g_ctx.uiFont,
              g_ctx.dbSettings, g_ctx.fontSize, &g_ctx };
+}
+
+bool dispatchToolbarOnlyModule(int id) {
+    switch (id) {
+        case IDM_TOOL2:
+            create_regular_report_module(makeCtx());
+            updateToolbarState();
+            return true;
+        case IDM_TOOL3:
+            create_specimen_sign_module(makeCtx());
+            updateToolbarState();
+            return true;
+        default:
+            return false;
+    }
 }
 
 void setMainStatusText(const wchar_t* text) {
@@ -735,6 +748,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 }
             }
+
+            if (dispatchToolbarOnlyModule(id)) return 0;
 
             // Fixed items
             switch (id) {
