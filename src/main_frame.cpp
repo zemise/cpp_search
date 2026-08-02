@@ -18,6 +18,7 @@
 
 #include "app_settings.h"
 #include "app_settings_io.h"
+#include "backup_blood_statistics_module.h"
 #include "crash_handler.h"
 #include "emergency_statistics_module.h"
 #include "log.h"
@@ -25,6 +26,7 @@
 #include "barcode_module.h"
 #include "blood_module.h"
 #include "hiv_statistics_module.h"
+#include "immune_duplicate_statistics_module.h"
 #include "mchc_correction_module.h"
 #include "menu_toolbar.h"
 #include "module_registry.h"
@@ -257,7 +259,6 @@ void closeActiveMdiChild() {
 // ── placeholder factories (to be replaced with real modules) ────
 
 HWND create_tool4_placeholder(const ModuleContext&) { return createMdiChild(L"工具4"); }
-HWND create_stat4_placeholder(const ModuleContext&) { return createMdiChild(L"统计分析4"); }
 HWND create_stat5_placeholder(const ModuleContext&) { return createMdiChild(L"统计分析5"); }
 
 // ── module registry ─────────────────────────────────────────────
@@ -272,7 +273,8 @@ const ModuleDef g_modules[] = {
     { L"PhoneDirectory", L"工具", L"常用电话(&4)",       IDM_TOOL6,   create_phone_directory_module },
     { L"HivStatistics", L"统计分析管理", L"HIV 抗体检测统计(&1)", IDM_STAT1, create_hiv_statistics_module },
     { L"EmergencyStatistics", L"统计分析管理", L"急诊样本统计(&2)", IDM_STAT2, create_emergency_statistics_module },
-    { L"Stat4",    L"统计分析管理", L"统计分析4(&4)",    IDM_STAT4,   create_stat4_placeholder },
+    { L"ImmuneDuplicateStatistics", L"统计分析管理", L"免疫重复项目统计(&3)", IDM_STAT3, create_immune_duplicate_statistics_module },
+    { L"BackupBloodStatistics", L"统计分析管理", L"备血统计(&4)", IDM_STAT4, create_backup_blood_statistics_module },
     { L"Stat5",    L"统计分析管理", L"统计分析5(&5)",    IDM_STAT5,   create_stat5_placeholder },
     { L"Settings", L"系统",     L"系统设置(&S)...",     IDM_SETTINGS, create_settings_module  },
 };

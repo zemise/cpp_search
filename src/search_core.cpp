@@ -3338,6 +3338,392 @@ bool query_emergency_statistics(const EmergencyStatQuery& query, EmergencyStatSu
 #endif
 }
 
+bool query_backup_blood_statistics(const BackupBloodStatQuery& query,
+                                   BackupBloodStatSummary& summary,
+                                   std::vector<BackupBloodStatDetailRow>& rows,
+                                   std::string& error, LogFn log) {
+    summary = BackupBloodStatSummary{};
+    rows.clear();
+#ifndef _WIN32
+    (void)query;
+    (void)log;
+    error = "query_backup_blood_statistics is only available on Windows";
+    return false;
+#else
+    constexpr const char* kBackupValue = "备血";
+    const std::string start_date = trim(query.start_date);
+    const std::string end_date = trim(query.end_date);
+    if (start_date.empty() || end_date.empty()) {
+        error = "start_date and end_date are required";
+        return false;
+    }
+    if (start_date > end_date) {
+        error = "start_date must not be later than end_date";
+        return false;
+    }
+
+    DbContext db;
+    if (!connect(query.connection_string, db, error, log)) {
+        return false;
+    }
+
+    const std::string apply_status = trim(query.apply_status);
+    const std::string requested_campus = trim(query.campus);
+    const auto campus_for_dept = [](const std::string& apply_dept) {
+        return contains_text(apply_dept, "滨水") ? std::string("新院") : std::string("老院");
+    };
+    const auto campus_matches = [&requested_campus](const std::string& campus) {
+        return (requested_campus != "老院" && requested_campus != "新院") ||
+               campus == requested_campus;
+    };
+    std::ostringstream sql;
+    sql << "SELECT "
+        << "isnull(LTRIM(RTRIM(a.ApplyFormNO)),''),"
+        << "isnull(CONVERT(varchar(19),a.Apply_Time,120),''),"
+        << "isnull(LTRIM(RTRIM(a.TranProperty)),''),"
+        << "isnull(LTRIM(RTRIM(a.UseBloodNote)),''),"
+        << "isnull(LTRIM(RTRIM(a.Apply_Purpose)),''),"
+        << "isnull(LTRIM(RTRIM(a.ApplyForm_Statue)),''),"
+        << "isnull(LTRIM(RTRIM(a.Patient_NO)),''),"
+        << "isnull(LTRIM(RTRIM(a.Patient_Name)),''),"
+        << "isnull(LTRIM(RTRIM(a.Apply_Dept)),''),"
+        << "isnull(LTRIM(RTRIM(a.Apply_BedNo)),''),"
+        << "CASE WHEN isnull(a.Delete_Bit,0)=1 THEN '1' ELSE '0' END"
+        << " FROM LS_XK_BloodRequestApply a WITH (NOLOCK)"
+        << " WHERE a.Apply_Time>='" << sql_escape(start_date) << "'"
+        << " AND a.Apply_Time<DATEADD(day,1,'" << sql_escape(end_date) << "')"
+        << " AND (LTRIM(RTRIM(isnull(a.TranProperty,'')))='" << sql_escape(kBackupValue) << "'"
+        << " OR isnull(a.UseBloodNote,'') LIKE '%" << sql_escape(kBackupValue) << "%'"
+        << " OR isnull(a.Apply_Purpose,'') LIKE '%" << sql_escape(kBackupValue) << "%')";
+    if (!query.include_deleted) {
+        sql << " AND isnull(a.Delete_Bit,0)=0"
+            << " AND LTRIM(RTRIM(isnull(a.ApplyForm_Statue,'')))<>'已删除'";
+    }
+    if (!apply_status.empty() && apply_status != "全部") {
+        sql << " AND LTRIM(RTRIM(isnull(a.ApplyForm_Statue,'')))='"
+            << sql_escape(apply_status) << "'";
+    }
+    sql << " ORDER BY a.Apply_Time DESC,a.ApplyFormNO";
+
+    if (log) log("exec sql: " + sql.str() + "\n");
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!exec_query(db.dbc, sql.str(), stmt, error)) {
+        return false;
+    }
+
+    std::map<std::string, size_t> apply_form_index;
+    const auto fill_if_blank = [](std::string& target, const std::string& value) {
+        if (trim(target).empty() && !trim(value).empty()) target = value;
+    };
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        const std::string apply_form_no = trim(fetch_column(stmt, 1));
+        const std::string apply_time = fetch_column(stmt, 2);
+        const std::string tran_property = trim(fetch_column(stmt, 3));
+        const std::string use_blood_note = trim(fetch_column(stmt, 4));
+        const std::string apply_purpose = trim(fetch_column(stmt, 5));
+        const std::string status = fetch_column(stmt, 6);
+        const std::string patient_no = fetch_column(stmt, 7);
+        const std::string patient_name = fetch_column(stmt, 8);
+        const std::string apply_dept = fetch_column(stmt, 9);
+        const std::string bed_no = fetch_column(stmt, 10);
+        const bool delete_bit = trim(fetch_column(stmt, 11)) == "1";
+        const bool apply_type_match = tran_property == kBackupValue;
+        const bool use_blood_note_match = use_blood_note.find(kBackupValue) != std::string::npos;
+        const bool apply_purpose_match = apply_purpose.find(kBackupValue) != std::string::npos;
+
+        if (apply_form_no.empty()) {
+            if (campus_matches(campus_for_dept(apply_dept))) {
+                ++summary.missing_apply_form_no_count;
+            }
+            continue;
+        }
+
+        auto found = apply_form_index.find(apply_form_no);
+        if (found == apply_form_index.end()) {
+            BackupBloodStatDetailRow row;
+            row.apply_form_no = apply_form_no;
+            row.apply_time = apply_time;
+            row.tran_property = tran_property;
+            row.use_blood_note = use_blood_note;
+            row.apply_purpose = apply_purpose;
+            row.apply_status = status;
+            row.patient_no = patient_no;
+            row.patient_name = patient_name;
+            row.apply_dept = apply_dept;
+            row.bed_no = bed_no;
+            row.delete_bit = delete_bit;
+            row.apply_type_match = apply_type_match;
+            row.use_blood_note_match = use_blood_note_match;
+            row.apply_purpose_match = apply_purpose_match;
+            apply_form_index[apply_form_no] = rows.size();
+            rows.push_back(std::move(row));
+            continue;
+        }
+
+        auto& row = rows[found->second];
+        row.apply_type_match = row.apply_type_match || apply_type_match;
+        row.use_blood_note_match = row.use_blood_note_match || use_blood_note_match;
+        row.apply_purpose_match = row.apply_purpose_match || apply_purpose_match;
+        row.delete_bit = row.delete_bit || delete_bit;
+        if (apply_type_match) row.tran_property = tran_property;
+        if (use_blood_note_match) row.use_blood_note = use_blood_note;
+        if (apply_purpose_match) row.apply_purpose = apply_purpose;
+        if (delete_bit || status == "已删除") row.apply_status = status;
+        fill_if_blank(row.apply_time, apply_time);
+        fill_if_blank(row.apply_status, status);
+        fill_if_blank(row.patient_no, patient_no);
+        fill_if_blank(row.patient_name, patient_name);
+        fill_if_blank(row.apply_dept, apply_dept);
+        fill_if_blank(row.bed_no, bed_no);
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+
+    for (auto& row : rows) {
+        row.campus = campus_for_dept(row.apply_dept);
+    }
+    rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const auto& row) {
+        return !campus_matches(row.campus);
+    }), rows.end());
+
+    for (auto& row : rows) {
+        row.match_source.clear();
+        const auto append_source = [&row](const char* source) {
+            if (!row.match_source.empty()) row.match_source += "/";
+            row.match_source += source;
+        };
+        int match_count = 0;
+        if (row.apply_type_match) { append_source("申请类型"); ++match_count; }
+        if (row.use_blood_note_match) { append_source("用血备注"); ++match_count; }
+        if (row.apply_purpose_match) { append_source("输血目的"); ++match_count; }
+        if (match_count >= 2) ++summary.multiple_match_count;
+        if (row.apply_type_match) ++summary.apply_type_count;
+        if (row.use_blood_note_match) ++summary.use_blood_note_count;
+        if (row.apply_purpose_match) ++summary.apply_purpose_count;
+        const std::string status = trim(row.apply_status);
+        const bool deleted = row.delete_bit || status == "已删除";
+        if (deleted) ++summary.deleted_count;
+        else if (status == "未审核") ++summary.unreviewed_count;
+        else if (status == "已审核") ++summary.reviewed_count;
+        else if (status == "已完结") ++summary.completed_count;
+        else if (status == "已驳回") ++summary.rejected_count;
+        else ++summary.other_status_count;
+    }
+    summary.total_count = static_cast<int>(rows.size());
+    error.clear();
+    return true;
+#endif
+}
+
+bool query_immune_duplicate_statistics(const ImmuneDuplicateStatQuery& query,
+                                       ImmuneDuplicateStatSummary& summary,
+                                       std::vector<ImmuneDuplicateStatDetailRow>& rows,
+                                       std::string& error, LogFn log) {
+    summary = ImmuneDuplicateStatSummary{};
+    rows.clear();
+#ifndef _WIN32
+    (void)query;
+    (void)log;
+    error = "query_immune_duplicate_statistics is only available on Windows";
+    return false;
+#else
+    constexpr const char* kBaseOrderKeyword = "输血前常规检查";
+    constexpr const char* kHepatitisKeyword = "乙肝三对";
+    constexpr const char* kSyphilisKeyword = "梅毒";
+
+    const std::string start_time = trim(query.start_time);
+    const std::string end_time = trim(query.end_time);
+    if (start_time.empty() || end_time.empty()) {
+        error = "start_time and end_time are required";
+        return false;
+    }
+    if (start_time > end_time) {
+        error = "start_time must not be later than end_time";
+        return false;
+    }
+
+    DbContext db;
+    if (!connect(query.connection_string, db, error, log)) {
+        return false;
+    }
+
+    struct BaseGroup {
+        std::set<std::string> barcodes;
+        std::string patient_no;
+        std::string name;
+        std::string department;
+        std::string order_text;
+        std::string sign_time;
+    };
+
+    std::map<std::string, BaseGroup> base_groups;
+    std::set<std::string> base_barcodes;
+    std::set<std::string> missing_barcode_ids;
+
+    std::ostringstream base_sql;
+    base_sql << "SELECT "
+             << "isnull(CONVERT(varchar(36),y.YJSQID),''),"
+             << "isnull(CONVERT(varchar(36),y.INPATIENT_ID),''),"
+             << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.TXM))),''),"
+             << "isnull(LTRIM(RTRIM(CONVERT(varchar(500),y.SQNR))),''),"
+             << "isnull(CONVERT(varchar(19),y.JSSJ,120),''),"
+             << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),z.INPATIENT_NO))),''),"
+             << "isnull(LTRIM(RTRIM(CONVERT(varchar(200),z.NAME))),''),"
+             << "isnull(NULLIF(LTRIM(RTRIM(dept.NAME)),''),"
+             << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),y.SQKS))),''))"
+             << " FROM YJ_ZYSQ y WITH (NOLOCK)"
+             << " LEFT JOIN ZY_INPATIENT z WITH (NOLOCK) ON z.INPATIENT_ID=y.INPATIENT_ID"
+             << " LEFT JOIN JC_DEPT_PROPERTY dept WITH (NOLOCK)"
+             << " ON LTRIM(RTRIM(CONVERT(varchar(100),dept.DEPT_ID)))="
+             << "LTRIM(RTRIM(CONVERT(varchar(100),y.SQKS)))"
+             << " AND isnull(dept.DELETED,0)=0"
+             << " WHERE y.JSSJ>='" << sql_escape(start_time) << "'"
+             << " AND y.JSSJ<DATEADD(minute,1,'" << sql_escape(end_time) << "')"
+             << " AND y.ZXKS IN (102,401)"
+             << " AND (y.BSCBZ IS NULL OR y.BSCBZ=0)"
+             << " AND y.SQNR LIKE '%" << sql_escape(kBaseOrderKeyword) << "%'"
+             << " ORDER BY y.JSSJ,y.TXM,y.YJSQID";
+    if (log) log("exec sql: " + base_sql.str() + "\n");
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!exec_query(db.dbc, base_sql.str(), stmt, error)) {
+        return false;
+    }
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        const std::string request_id = fetch_column(stmt, 1);
+        const std::string inpatient_id = fetch_column(stmt, 2);
+        const std::string barcode = fetch_column(stmt, 3);
+        const std::string order_text = fetch_column(stmt, 4);
+        const std::string sign_time = fetch_column(stmt, 5);
+        const std::string patient_no = fetch_column(stmt, 6);
+        const std::string name = fetch_column(stmt, 7);
+        const std::string department = fetch_column(stmt, 8);
+        if (inpatient_id.empty()) {
+            continue;
+        }
+        if (barcode.empty()) {
+            missing_barcode_ids.insert(request_id.empty() ? inpatient_id + "\n" + sign_time : request_id);
+            continue;
+        }
+        auto& group = base_groups[inpatient_id];
+        group.barcodes.insert(barcode);
+        base_barcodes.insert(barcode);
+        fill_if_empty(group.patient_no, patient_no);
+        fill_if_empty(group.name, name);
+        fill_if_empty(group.department, department);
+        fill_if_empty(group.order_text, order_text);
+        fill_if_empty(group.sign_time, sign_time);
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+
+    summary.base_barcode_count = static_cast<int>(base_barcodes.size());
+    summary.base_patient_count = static_cast<int>(base_groups.size());
+    summary.missing_base_barcode_count = static_cast<int>(missing_barcode_ids.size());
+    for (const auto& entry : base_groups) {
+        if (trim(entry.second.patient_no).empty()) {
+            ++summary.unmatched_inpatient_count;
+        }
+    }
+    if (base_groups.empty()) {
+        error.clear();
+        return true;
+    }
+
+    std::ostringstream duplicate_sql;
+    duplicate_sql << "SELECT "
+                  << "isnull(CONVERT(varchar(36),d.YJSQID),''),"
+                  << "isnull(CONVERT(varchar(36),d.INPATIENT_ID),''),"
+                  << "isnull(LTRIM(RTRIM(CONVERT(varchar(100),d.TXM))),''),"
+                  << "isnull(LTRIM(RTRIM(CONVERT(varchar(500),d.SQNR))),''),"
+                  << "isnull(CONVERT(varchar(19),d.JSSJ,120),'')"
+                  << " FROM YJ_ZYSQ d WITH (NOLOCK)"
+                  << " WHERE d.JSSJ>='" << sql_escape(start_time) << "'"
+                  << " AND d.JSSJ<DATEADD(minute,1,'" << sql_escape(end_time) << "')"
+                  << " AND d.ZXKS IN (102,401)"
+                  << " AND (d.BSCBZ IS NULL OR d.BSCBZ=0)"
+                  << " AND (d.SQNR LIKE '%" << sql_escape(kHepatitisKeyword) << "%'"
+                  << " OR d.SQNR LIKE '%" << sql_escape(kSyphilisKeyword) << "%')"
+                  << " AND EXISTS (SELECT 1 FROM YJ_ZYSQ b WITH (NOLOCK)"
+                  << " WHERE b.INPATIENT_ID=d.INPATIENT_ID"
+                  << " AND b.JSSJ>='" << sql_escape(start_time) << "'"
+                  << " AND b.JSSJ<DATEADD(minute,1,'" << sql_escape(end_time) << "')"
+                  << " AND b.ZXKS IN (102,401)"
+                  << " AND (b.BSCBZ IS NULL OR b.BSCBZ=0)"
+                  << " AND NULLIF(LTRIM(RTRIM(isnull(b.TXM,''))),'') IS NOT NULL"
+                  << " AND b.SQNR LIKE '%" << sql_escape(kBaseOrderKeyword) << "%')"
+                  << " ORDER BY d.JSSJ,d.TXM,d.YJSQID";
+    if (log) log("exec sql: " + duplicate_sql.str() + "\n");
+
+    stmt = SQL_NULL_HSTMT;
+    if (!exec_query(db.dbc, duplicate_sql.str(), stmt, error)) {
+        return false;
+    }
+
+    auto join_barcodes = [](const std::set<std::string>& values) {
+        std::string joined;
+        for (const auto& value : values) {
+            if (!joined.empty()) joined += "/";
+            joined += value;
+        }
+        return joined;
+    };
+    std::set<std::string> seen_request_ids;
+    std::set<std::string> duplicate_patients;
+    std::set<std::string> duplicate_barcodes;
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        const std::string request_id = fetch_column(stmt, 1);
+        const std::string inpatient_id = fetch_column(stmt, 2);
+        const std::string duplicate_barcode = fetch_column(stmt, 3);
+        const std::string duplicate_order_text = fetch_column(stmt, 4);
+        const std::string duplicate_sign_time = fetch_column(stmt, 5);
+        if (request_id.empty() || !seen_request_ids.insert(request_id).second) {
+            continue;
+        }
+        const auto base_it = base_groups.find(inpatient_id);
+        if (base_it == base_groups.end()) {
+            continue;
+        }
+        const auto& base = base_it->second;
+        const bool same_barcode = !duplicate_barcode.empty() && base.barcodes.count(duplicate_barcode) != 0;
+
+        ImmuneDuplicateStatDetailRow row;
+        row.patient_no = base.patient_no;
+        row.name = base.name;
+        row.type_name = "住院";
+        row.department = base.department;
+        row.base_barcode = join_barcodes(base.barcodes);
+        row.base_order_text = base.order_text;
+        row.base_sign_time = base.sign_time;
+        row.duplicate_barcode = duplicate_barcode;
+        row.duplicate_item_name = duplicate_order_text;
+        const bool hepatitis = duplicate_order_text.find(kHepatitisKeyword) != std::string::npos;
+        const bool syphilis = duplicate_order_text.find(kSyphilisKeyword) != std::string::npos;
+        if (hepatitis) row.duplicate_category = kHepatitisKeyword;
+        if (syphilis) {
+            if (!row.duplicate_category.empty()) row.duplicate_category += "/";
+            row.duplicate_category += kSyphilisKeyword;
+        }
+        row.duplicate_sign_time = duplicate_sign_time;
+        row.relation = same_barcode ? "同条码" : "跨条码";
+        rows.push_back(std::move(row));
+
+        duplicate_patients.insert(inpatient_id);
+        if (!duplicate_barcode.empty()) duplicate_barcodes.insert(duplicate_barcode);
+        if (same_barcode) {
+            ++summary.same_barcode_duplicate_count;
+        } else {
+            ++summary.cross_barcode_duplicate_count;
+        }
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+
+    summary.duplicate_patient_count = static_cast<int>(duplicate_patients.size());
+    summary.duplicate_barcode_count = static_cast<int>(duplicate_barcodes.size());
+    summary.duplicate_item_count = static_cast<int>(rows.size());
+    error.clear();
+    return true;
+#endif
+}
+
 bool query_outpatient_charges(const OutpatientChargeQuery& query, std::vector<OutpatientChargeRow>& rows, std::string& error, LogFn log) {
     rows.clear();
 #ifndef _WIN32

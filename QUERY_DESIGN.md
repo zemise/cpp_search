@@ -151,7 +151,10 @@ packet size=4096;user id=...;password=...;data source=...;persist security info=
 | 病人号 | `Patient_NO` |
 | 病人类型 | `Patient_NOType` |
 | 病人姓名 | `Patient_Name` |
-| 紧急程度/输血性质 | `TranProperty` |
+| 紧急程度/输血性质、申请类型当前显示来源 | `TranProperty` |
+| 用血备注 | `UseBloodNote` |
+| 输血目的/申请目的 | `Apply_Purpose` |
+| 紧急级别原始值 | `UrgencyLevel`，当前输血查询原样显示，未确认值域 |
 
 ### 申请成分
 
@@ -162,6 +165,27 @@ ApplyCompositionApplyNumApplyUnit;
 ```
 
 如果同一申请单对应多行子表记录，则在同一列表单元格中用分号拼接。
+
+### 备血统计
+
+`统计分析管理 -> 备血统计` 直接读取申请主表，不关联申请成分子表。筛选时间为 `Apply_Time`，使用左闭右开的自然日范围：
+
+```text
+Apply_Time >= 开始日期
+AND Apply_Time < DATEADD(day, 1, 结束日期)
+```
+
+默认只查询 `ISNULL(Delete_Bit,0)=0` 且 `ApplyForm_Statue<>'已删除'` 的有效记录；申请状态可精确筛选 `未审核 / 已审核 / 已完结 / 已驳回`。页面勾选“包含已删除”后取消有效记录限制，将 `Delete_Bit=1` 或状态为“已删除”的申请纳入查询。备血命中条件为：
+
+```text
+LTRIM(RTRIM(ISNULL(TranProperty,''))) = '备血'
+OR
+ISNULL(UseBloodNote,'') LIKE '%备血%'
+OR
+ISNULL(Apply_Purpose,'') LIKE '%备血%'
+```
+
+统计按去空格后的唯一 `ApplyFormNO` 去重。分别汇总申请类型命中、用血备注命中、输血目的命中、多项命中和任一命中的备血申请单总数；同一申请单命中多个条件时在总数中只计一次。页面另按未审核、已审核、已完结、已驳回、已删除和其他状态显示分布，并在明细与 CSV 中保留 `Delete_Bit` 删除标志。申请状态筛选为 `全部 / 未审核 / 已审核 / 已完结 / 已驳回`，备血类型筛选为 `全部 / 申请类型 / 用血备注 / 输血目的 / 多项命中`。院区下拉提供 `全部 / 老院 / 新院`；C++ 按 `Apply_Dept` 是否包含“滨水”派生新院或老院，并在派生后按所选院区过滤，再计算汇总、状态分布和明细，不在 SQL 中增加院区 `OR + LIKE`。空申请单号不进入正式总数，异常数按物理行的 `Apply_Dept` 派生院区后过滤。`UrgencyLevel` 不参与备血统计。主查询返回同批必要明细，页面备血类型筛选、排序和 CSV 导出均使用当前内存结果，不额外查询 LIS；导出文件名使用最后一次成功查询的日期和院区。顶部采用两行筛选布局并按当前字体动态测量标签宽度。
 
 ### 交叉配血记录
 

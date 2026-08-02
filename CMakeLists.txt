@@ -154,11 +154,13 @@ endif()
 add_executable(main_app WIN32
     src/main_frame.cpp
     src/menu_toolbar.cpp
+    src/backup_blood_statistics_module.cpp
     src/barcode_label_printing.cpp
     src/barcode_module.cpp
     src/blood_module.cpp
     src/emergency_statistics_module.cpp
     src/hiv_statistics_module.cpp
+    src/immune_duplicate_statistics_module.cpp
     src/machine_picker_popup.cpp
     src/mchc_correction_module.cpp
     src/outpatient_query_module.cpp

@@ -462,6 +462,96 @@ struct EmergencyStatQuery {
     bool only_unfinished = false;
 };
 
+struct BackupBloodStatQuery {
+    std::string connection_string;
+    std::string start_date;
+    std::string end_date;
+    std::string apply_status;  // 全部/未审核/已审核/已完结/已驳回
+    std::string campus;        // 全部/老院/新院，C++ 内存派生后过滤
+    bool include_deleted = false;
+};
+
+struct BackupBloodStatSummary {
+    int total_count = 0;
+    int apply_type_count = 0;
+    int use_blood_note_count = 0;
+    int apply_purpose_count = 0;
+    int multiple_match_count = 0;
+    int missing_apply_form_no_count = 0;
+    int unreviewed_count = 0;
+    int reviewed_count = 0;
+    int completed_count = 0;
+    int rejected_count = 0;
+    int deleted_count = 0;
+    int other_status_count = 0;
+};
+
+struct BackupBloodStatDetailRow {
+    std::string campus;        // Apply_Dept 包含“滨水”=新院，否则=老院
+    std::string match_source;  // 申请类型/用血备注/输血目的，可组合
+    std::string apply_form_no;
+    std::string apply_time;
+    std::string tran_property;
+    std::string use_blood_note;
+    std::string apply_purpose;
+    std::string apply_status;
+    std::string patient_no;
+    std::string patient_name;
+    std::string apply_dept;
+    std::string bed_no;
+    bool delete_bit = false;
+    bool apply_type_match = false;
+    bool use_blood_note_match = false;
+    bool apply_purpose_match = false;
+};
+
+struct ImmuneDuplicateStatQuery {
+    std::string connection_string;
+    std::string start_time;
+    std::string end_time;
+};
+
+struct ImmuneDuplicateStatSummary {
+    int base_barcode_count = 0;
+    int base_patient_count = 0;
+    int duplicate_patient_count = 0;
+    int duplicate_barcode_count = 0;
+    int duplicate_item_count = 0;
+    int same_barcode_duplicate_count = 0;
+    int cross_barcode_duplicate_count = 0;
+    int missing_base_barcode_count = 0;
+    int unmatched_inpatient_count = 0;
+};
+
+struct ImmuneDuplicateStatDetailRow {
+    std::string patient_no;
+    std::string name;
+    std::string type_name;
+    std::string department;
+    std::string bed_no;
+    std::string base_barcode;
+    std::string base_sample_no;
+    std::string base_order_text;
+    std::string base_sign_time;
+    std::string duplicate_barcode;
+    std::string duplicate_sample_no;
+    std::string duplicate_item_code;
+    std::string duplicate_item_name;
+    std::string duplicate_category;
+    std::string result;
+    std::string unit;
+    std::string duplicate_sign_time;
+    std::string report_time;
+    std::string reviewed;
+    std::string sent;
+    std::string relation;
+    std::string report_no;
+    std::string machine_code;
+    std::string machine_name;
+    std::string room_code;
+    std::string inspect_date;
+};
+
 struct OutpatientChargeQuery {
     std::string connection_string;
     std::string start_time;
@@ -516,6 +606,8 @@ bool query_specimen_barcode(const SpecimenBarcodeQuery& query, SpecimenBarcodeRe
 bool query_specimen_signed_list(const SpecimenSignedListQuery& query, std::vector<SpecimenSignedListRow>& rows, std::string& error, LogFn log = {});
 bool query_hiv_statistics(const HivStatQuery& query, HivStatSummary& summary, std::vector<HivStatDetailRow>& rows, std::string& error, LogFn log = {});
 bool query_emergency_statistics(const EmergencyStatQuery& query, EmergencyStatSummary& summary, std::vector<EmergencyStatDetailRow>& rows, std::string& error, LogFn log = {});
+bool query_backup_blood_statistics(const BackupBloodStatQuery& query, BackupBloodStatSummary& summary, std::vector<BackupBloodStatDetailRow>& rows, std::string& error, LogFn log = {});
+bool query_immune_duplicate_statistics(const ImmuneDuplicateStatQuery& query, ImmuneDuplicateStatSummary& summary, std::vector<ImmuneDuplicateStatDetailRow>& rows, std::string& error, LogFn log = {});
 bool query_outpatient_charges(const OutpatientChargeQuery& query, std::vector<OutpatientChargeRow>& rows, std::string& error, LogFn log = {});
 
 }  // namespace search
