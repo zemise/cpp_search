@@ -200,20 +200,6 @@ COLORREF rowBackColor(const search::OutpatientChargeRow& row) {
     return search::trim(row.barcode) == "未生成" ? COLOR_PENDING_BARCODE : COLOR_WHITE;
 }
 
-int labelWidth(HWND parent, HWND labelHwnd, int minWidth) {
-    const std::wstring text = controlText(labelHwnd);
-    HDC dc = GetDC(parent);
-    if (!dc) return S(parent, minWidth);
-    HFONT font = reinterpret_cast<HFONT>(SendMessageW(labelHwnd, WM_GETFONT, 0, 0));
-    if (!font) font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    HGDIOBJ oldFont = SelectObject(dc, font);
-    SIZE size{};
-    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
-    SelectObject(dc, oldFont);
-    ReleaseDC(parent, dc);
-    return (std::max)(S(parent, minWidth), static_cast<int>(size.cx) + S(parent, 12));
-}
-
 void initList(HWND list) {
     for (int i = 0; i < static_cast<int>(std::size(COLUMNS)); ++i) {
         search::add_list_column(list, i, COLUMNS[i].title, COLUMNS[i].width);
@@ -343,25 +329,25 @@ void resizeLayout(HWND hwnd, OutpatientQueryState* st) {
     const int groupGap = S(hwnd, 14);
 
     int x = pad;
-    int lw = labelWidth(hwnd, st->startLabel, 76);
+    int lw = search::measure_control_text_width(hwnd, st->startLabel, 76);
     MoveWindow(st->startLabel, x, row1 + labelYPad, lw, editH, TRUE); x += lw + labelGap;
     MoveWindow(st->startDate, x, row1, S(hwnd, 160), editH, TRUE); x += S(hwnd, 160) + groupGap;
-    lw = labelWidth(hwnd, st->endLabel, 24);
+    lw = search::measure_control_text_width(hwnd, st->endLabel, 24);
     MoveWindow(st->endLabel, x, row1 + labelYPad, lw, editH, TRUE); x += lw + labelGap;
     MoveWindow(st->endDate, x, row1, S(hwnd, 160), editH, TRUE); x += S(hwnd, 160) + groupGap;
-    lw = labelWidth(hwnd, st->labDepartmentLabel, 48);
+    lw = search::measure_control_text_width(hwnd, st->labDepartmentLabel, 48);
     MoveWindow(st->labDepartmentLabel, x, row1 + labelYPad, lw, editH, TRUE); x += lw + labelGap;
     MoveWindow(st->labDepartment, x, row1, S(hwnd, 88), S(hwnd, 160), TRUE); x += S(hwnd, 88) + groupGap;
     MoveWindow(st->includeNonLab, x, row1 + S(hwnd, 2), S(hwnd, 130), editH, TRUE);
 
     x = pad;
-    lw = labelWidth(hwnd, st->outpatientNoLabel, 58);
+    lw = search::measure_control_text_width(hwnd, st->outpatientNoLabel, 58);
     MoveWindow(st->outpatientNoLabel, x, row2 + labelYPad, lw, editH, TRUE); x += lw + labelGap;
     MoveWindow(st->outpatientNo, x, row2, S(hwnd, 160), editH, TRUE); x += S(hwnd, 160) + groupGap;
-    lw = labelWidth(hwnd, st->patientNameLabel, 42);
+    lw = search::measure_control_text_width(hwnd, st->patientNameLabel, 42);
     MoveWindow(st->patientNameLabel, x, row2 + labelYPad, lw, editH, TRUE); x += lw + labelGap;
     MoveWindow(st->patientName, x, row2, S(hwnd, 140), editH, TRUE); x += S(hwnd, 140) + groupGap;
-    lw = labelWidth(hwnd, st->idCardLabel, 58);
+    lw = search::measure_control_text_width(hwnd, st->idCardLabel, 58);
     MoveWindow(st->idCardLabel, x, row2 + labelYPad, lw, editH, TRUE); x += lw + labelGap;
     MoveWindow(st->idCard, x, row2, S(hwnd, 220), editH, TRUE); x += S(hwnd, 220) + groupGap;
     MoveWindow(st->query, x, row2 - S(hwnd, 1), S(hwnd, 70), btnH, TRUE); x += S(hwnd, 70) + groupGap;

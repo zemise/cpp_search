@@ -16,7 +16,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <cwchar>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -245,22 +244,6 @@ int S(HWND hwnd, int value) {
 HWND label(HWND parent, const wchar_t* text, int x, int y, int w, int h, DWORD align = SS_RIGHT) {
     return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | align,
                            x, y, w, h, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
-}
-
-int measuredLabelWidth(HWND parent, HWND control, int minimumWidth) {
-    wchar_t text[64]{};
-    GetWindowTextW(control, text, static_cast<int>(std::size(text)));
-    HDC dc = GetDC(parent);
-    if (!dc) return S(parent, minimumWidth);
-    HFONT font = reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0));
-    if (!font) font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    HGDIOBJ oldFont = SelectObject(dc, font);
-    SIZE size{};
-    GetTextExtentPoint32W(dc, text, static_cast<int>(std::wcslen(text)), &size);
-    SelectObject(dc, oldFont);
-    ReleaseDC(parent, dc);
-    return (std::max)(S(parent, minimumWidth),
-                      static_cast<int>(size.cx) + S(parent, 12));
 }
 
 HWND datePicker(HWND parent, int id, int x, int y, int w, int h) {
@@ -523,28 +506,28 @@ void resizeLayout(HWND hwnd, BackupBloodState* st) {
     const int statusSummaryHeight = S(hwnd, 62);
 
     int x = pad;
-    int labelWidth = measuredLabelWidth(hwnd, st->dateLabel, 72);
+    int labelWidth = search::measure_control_text_width(hwnd, st->dateLabel, 72);
     MoveWindow(st->dateLabel, x, firstRow + labelYOffset, labelWidth, controlHeight, TRUE);
     x += labelWidth + labelGap;
     MoveWindow(st->startDate, x, firstRow, S(hwnd, 118), controlHeight, TRUE);
     x += S(hwnd, 118) + controlGap;
-    labelWidth = measuredLabelWidth(hwnd, st->dateToLabel, 20);
+    labelWidth = search::measure_control_text_width(hwnd, st->dateToLabel, 20);
     MoveWindow(st->dateToLabel, x, firstRow + labelYOffset, labelWidth, controlHeight, TRUE);
     x += labelWidth + controlGap;
     MoveWindow(st->endDate, x, firstRow, S(hwnd, 118), controlHeight, TRUE);
     x += S(hwnd, 118) + groupGap;
-    labelWidth = measuredLabelWidth(hwnd, st->applyStatusLabel, 72);
+    labelWidth = search::measure_control_text_width(hwnd, st->applyStatusLabel, 72);
     MoveWindow(st->applyStatusLabel, x, firstRow + labelYOffset, labelWidth, controlHeight, TRUE);
     x += labelWidth + labelGap;
     MoveWindow(st->applyStatus, x, firstRow, S(hwnd, 104), S(hwnd, 220), TRUE);
     x += S(hwnd, 104) + groupGap;
-    labelWidth = measuredLabelWidth(hwnd, st->campusLabel, 48);
+    labelWidth = search::measure_control_text_width(hwnd, st->campusLabel, 48);
     MoveWindow(st->campusLabel, x, firstRow + labelYOffset, labelWidth, controlHeight, TRUE);
     x += labelWidth + labelGap;
     MoveWindow(st->campus, x, firstRow, S(hwnd, 82), S(hwnd, 180), TRUE);
 
     x = pad;
-    labelWidth = measuredLabelWidth(hwnd, st->backupTypeLabel, 72);
+    labelWidth = search::measure_control_text_width(hwnd, st->backupTypeLabel, 72);
     MoveWindow(st->backupTypeLabel, x, secondRow + labelYOffset, labelWidth, controlHeight, TRUE);
     x += labelWidth + labelGap;
     MoveWindow(st->backupType, x, secondRow, S(hwnd, 110), S(hwnd, 220), TRUE);
@@ -884,14 +867,15 @@ HWND create_backup_blood_statistics_module(const ModuleContext& ctx) {
     mcs.szClass = WND_CLASS;
     mcs.hOwner = ctx.instance;
     mcs.x = mcs.y = mcs.cx = mcs.cy = CW_USEDEFAULT;
-    mcs.style = WS_MAXIMIZE;
     mcs.lParam = reinterpret_cast<LPARAM>(st);
     HWND child = reinterpret_cast<HWND>(
         SendMessageW(ctx.mdiClient, WM_MDICREATE, 0, reinterpret_cast<LPARAM>(&mcs)));
     if (!child) {
         delete st;
         MessageBoxW(ctx.mdiClient, L"备血统计窗口创建失败。", WINDOW_TITLE, MB_ICONERROR);
+        return nullptr;
     }
+    SendMessageW(ctx.mdiClient, WM_MDIMAXIMIZE, reinterpret_cast<WPARAM>(child), 0);
     return child;
 }
 

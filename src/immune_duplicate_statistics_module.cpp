@@ -85,6 +85,8 @@ using DetailRow = search::ImmuneDuplicateStatDetailRow;
 
 struct ImmuneDuplicateState {
     ModuleContext ctx;
+    HWND startTimeLabel = nullptr;
+    HWND endTimeLabel = nullptr;
     HWND startDate = nullptr;
     HWND endDate = nullptr;
     HWND query = nullptr;
@@ -327,16 +329,39 @@ void resizeLayout(HWND hwnd, ImmuneDuplicateState* st) {
     const int w = rc.right - rc.left;
     const int h = rc.bottom - rc.top;
     const int pad = S(hwnd, 10);
-    const int topH = S(hwnd, 44);
+    const int labelGap = S(hwnd, 6);
+    const int controlGap = S(hwnd, 8);
+    const int groupGap = S(hwnd, 18);
+    const int controlH = S(hwnd, 25);
+    const int labelYOffset = S(hwnd, 2);
+    const int firstRow = S(hwnd, 9);
+    const int secondRow = S(hwnd, 42);
+    const int topH = S(hwnd, 78);
     const int summaryH = S(hwnd, 72);
-    const int editH = S(hwnd, 24);
-    const int statusX = S(hwnd, 612);
-    const int statusW = (std::max)(S(hwnd, 160), w - statusX - pad);
 
-    MoveWindow(st->status, statusX, S(hwnd, 12), statusW, editH, TRUE);
-    MoveWindow(st->summaryList, pad, topH + pad, w - pad * 2, summaryH, TRUE);
-    MoveWindow(st->details, pad, topH + summaryH + pad * 2, w - pad * 2,
-               (std::max)(S(hwnd, 100), h - topH - summaryH - pad * 3), TRUE);
+    int x = pad;
+    int labelW = search::measure_control_text_width(hwnd, st->startTimeLabel, 72);
+    MoveWindow(st->startTimeLabel, x, firstRow + labelYOffset, labelW, controlH, TRUE);
+    x += labelW + labelGap;
+    MoveWindow(st->startDate, x, firstRow, S(hwnd, 172), controlH, TRUE);
+    x += S(hwnd, 172) + controlGap;
+    labelW = search::measure_control_text_width(hwnd, st->endTimeLabel, 20);
+    MoveWindow(st->endTimeLabel, x, firstRow + labelYOffset, labelW, controlH, TRUE);
+    x += labelW + controlGap;
+    MoveWindow(st->endDate, x, firstRow, S(hwnd, 172), controlH, TRUE);
+
+    x = pad;
+    MoveWindow(st->query, x, secondRow - S(hwnd, 1), S(hwnd, 64), S(hwnd, 27), TRUE);
+    x += S(hwnd, 64) + controlGap;
+    MoveWindow(st->exportCsv, x, secondRow - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE);
+    x += S(hwnd, 88) + groupGap;
+    MoveWindow(st->status, x, secondRow + labelYOffset,
+               (std::max)(0, w - x - pad), controlH, TRUE);
+
+    MoveWindow(st->summaryList, pad, topH, (std::max)(0, w - pad * 2), summaryH, TRUE);
+    MoveWindow(st->details, pad, topH + summaryH + pad,
+               (std::max)(0, w - pad * 2),
+               (std::max)(S(hwnd, 100), h - topH - summaryH - pad * 2), TRUE);
 }
 
 void runQuery(HWND hwnd, ImmuneDuplicateState* st) {
@@ -413,9 +438,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetPropW(hwnd, PROP_STATE, st);
             st->bgBrush = CreateSolidBrush(RGB(0xF0, 0xF0, 0xF0));
 
-            label(hwnd, L"签收时间：", 0, S(hwnd, 12), S(hwnd, 88), S(hwnd, 24));
+            st->startTimeLabel = label(hwnd, L"签收时间：", 0, 0, 0, 0);
             st->startDate = dateTimePicker(hwnd, IDC_START_TIME, S(hwnd, 92), S(hwnd, 10), S(hwnd, 172), S(hwnd, 24));
-            label(hwnd, L"至", S(hwnd, 270), S(hwnd, 12), S(hwnd, 24), S(hwnd, 24), SS_CENTER);
+            st->endTimeLabel = label(hwnd, L"至", 0, 0, 0, 0, SS_CENTER);
             st->endDate = dateTimePicker(hwnd, IDC_END_TIME, S(hwnd, 300), S(hwnd, 10), S(hwnd, 172), S(hwnd, 24));
             setToday(st->startDate, false);
             setToday(st->endDate, true);
@@ -575,13 +600,14 @@ HWND create_immune_duplicate_statistics_module(const ModuleContext& ctx) {
     mcs.y = CW_USEDEFAULT;
     mcs.cx = CW_USEDEFAULT;
     mcs.cy = CW_USEDEFAULT;
-    mcs.style = WS_MAXIMIZE;
     mcs.lParam = reinterpret_cast<LPARAM>(st);
     HWND child = reinterpret_cast<HWND>(SendMessageW(ctx.mdiClient, WM_MDICREATE, 0, reinterpret_cast<LPARAM>(&mcs)));
     if (!child) {
         delete st;
         MessageBoxW(ctx.mdiClient, L"免疫重复项目统计窗口创建失败。", WINDOW_TITLE, MB_ICONERROR);
+        return nullptr;
     }
+    SendMessageW(ctx.mdiClient, WM_MDIMAXIMIZE, reinterpret_cast<WPARAM>(child), 0);
     return child;
 }
 

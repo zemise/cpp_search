@@ -63,6 +63,8 @@ struct MainUiHandles {
 };
 
 float dpi_scale_factor(HWND hwnd);
+int measure_control_text_width(HWND parent, HWND control, int minimumLogicalWidth,
+                               int horizontalPaddingLogical = 12);
 
 int clamp_font_size(int value);
 HFONT create_ui_font(int pointSize);
