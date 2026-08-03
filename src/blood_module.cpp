@@ -350,6 +350,25 @@ void setDefaultDateRange(BloodState* st) {
     DateTime_SetSystemtime(st->endDate, GDT_VALID, &today);
 }
 
+bool setApplyDateRange(BloodState* st, const std::string& applyTime) {
+    if (!st) return false;
+    unsigned int year = 0;
+    unsigned int month = 0;
+    unsigned int day = 0;
+    if (std::sscanf(applyTime.c_str(), "%u-%u-%u", &year, &month, &day) != 3 ||
+        year > 9999 || month < 1 || month > 12 || day < 1 ||
+        day > daysInMonth(static_cast<WORD>(year), static_cast<WORD>(month))) {
+        return false;
+    }
+    SYSTEMTIME date{};
+    date.wYear = static_cast<WORD>(year);
+    date.wMonth = static_cast<WORD>(month);
+    date.wDay = static_cast<WORD>(day);
+    DateTime_SetSystemtime(st->startDate, GDT_VALID, &date);
+    DateTime_SetSystemtime(st->endDate, GDT_VALID, &date);
+    return true;
+}
+
 void addLayout(BloodState* st, HWND hwnd, LayoutArea area, int x, int y, int w, int h) {
     if (hwnd) {
         st->layout.push_back({hwnd, area, x, y, w, h});
@@ -623,10 +642,23 @@ void updateDetail(BloodState* st, int selected) {
     }
 }
 
-void runBloodQuery(BloodState* st) {
+void selectBloodRow(BloodState* st, int rowIndex, int column) {
+    if (!st || rowIndex < 0 || rowIndex >= static_cast<int>(st->rows.size())) return;
+    ListView_SetItemState(st->list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_SetItemState(st->list, rowIndex, LVIS_SELECTED | LVIS_FOCUSED,
+                          LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_EnsureVisible(st->list, rowIndex, FALSE);
+    st->selectedCellRow = rowIndex;
+    st->selectedCellCol = column;
+    updateDetail(st, rowIndex);
+    SetFocus(st->list);
+    InvalidateRect(st->list, nullptr, FALSE);
+}
+
+bool runBloodQuery(BloodState* st) {
     if (search::build_connection_string_w(st->ctx.dbSettings).empty()) {
         MessageBoxW(nullptr, L"请先在“系统设置”中填写数据库连接信息。", L"缺少数据库设置", MB_ICONWARNING);
-        return;
+        return false;
     }
 
     wchar_t buf[256]{};
@@ -671,7 +703,7 @@ void runBloodQuery(BloodState* st) {
     if (!search::query_blood_requests(f, st->rows, error)) {
         SetWindowTextW(st->status, L"查询失败。");
         MessageBoxW(GetParent(st->list), search::utf8_to_wide(error).c_str(), L"查询失败", MB_ICONERROR);
-        return;
+        return false;
     }
 
     for (size_t i = 0; i < st->rows.size(); i++) {
@@ -699,6 +731,37 @@ void runBloodQuery(BloodState* st) {
         updateDetail(st, 0);
         InvalidateRect(st->list, nullptr, FALSE);
     }
+    return true;
+}
+
+void openBloodRequest(BloodState* st, const BloodRequestOpenTarget& target) {
+    if (!st) return;
+    const std::string applyFormNo = search::trim(target.apply_form_no);
+    if (applyFormNo.empty()) {
+        MessageBoxW(st->list, L"目标申请单号为空，无法定位。", WINDOW_TITLE, MB_ICONINFORMATION);
+        return;
+    }
+    if (!setApplyDateRange(st, target.apply_time)) {
+        MessageBoxW(st->list, L"目标申请日期无效，无法定位。", WINDOW_TITLE, MB_ICONINFORMATION);
+        return;
+    }
+
+    SetWindowTextW(st->patientNo, L"");
+    SetWindowTextW(st->patientName, L"");
+    SetWindowTextW(st->formNo, search::utf8_to_wide(applyFormNo).c_str());
+    SendMessageW(st->statusCombo, CB_SETCURSEL, 0, 0);
+    if (!runBloodQuery(st)) return;
+
+    const auto found = std::find_if(st->rows.begin(), st->rows.end(), [&](const auto& row) {
+        return search::trim(row.apply_form_no) == applyFormNo;
+    });
+    if (found == st->rows.end()) {
+        MessageBoxW(st->list, L"未在输血结果查询中找到该申请单。", WINDOW_TITLE, MB_ICONINFORMATION);
+        return;
+    }
+
+    const int rowIndex = static_cast<int>(std::distance(st->rows.begin(), found));
+    selectBloodRow(st, rowIndex, search::blood_request_columns::ApplyFormNo);
 }
 
 void addSummaryField(BloodState* st, HWND parent, const wchar_t* label, HWND& value,
@@ -2142,6 +2205,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_BLOOD_AUTO_QUERY:
             if (st) runBloodQuery(st);
             return 0;
+        case WM_BLOOD_OPEN_REQUEST: {
+            std::unique_ptr<BloodRequestOpenTarget> target(
+                reinterpret_cast<BloodRequestOpenTarget*>(lp));
+            if (st && target) openBloodRequest(st, *target);
+            return 0;
+        }
         case WM_SIZE:
             if (st) layoutBloodWindow(hwnd, st);
             return 0;

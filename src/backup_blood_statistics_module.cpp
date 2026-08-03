@@ -2,6 +2,7 @@
 
 #ifdef _WIN32
 
+#include "blood_module.h"
 #include "main_app.h"
 #include "resource.h"
 #include "search_core.h"
@@ -477,6 +478,32 @@ void applyBackupTypeFilter(BackupBloodState* st) {
     }
 }
 
+void openBloodRequestForRow(HWND owner, BackupBloodState* st, int index) {
+    if (!st || index < 0 || index >= static_cast<int>(st->rows.size())) return;
+    const auto& row = st->rows[static_cast<size_t>(index)];
+    if (row.delete_bit || search::trim(row.apply_status) == "已删除") {
+        MessageBoxW(owner, L"该申请单已删除，当前输血结果查询不显示已删除记录。",
+                    WINDOW_TITLE, MB_ICONINFORMATION);
+        return;
+    }
+    if (search::trim(row.apply_form_no).empty()) {
+        MessageBoxW(owner, L"该记录缺少申请单号，无法跳转到输血结果查询。",
+                    WINDOW_TITLE, MB_ICONINFORMATION);
+        return;
+    }
+
+    auto* target = new BloodRequestOpenTarget{
+        search::trim(row.apply_form_no),
+        search::trim(row.apply_time),
+    };
+    HWND blood = create_blood_module(st->ctx);
+    if (!blood || !PostMessageW(blood, WM_BLOOD_OPEN_REQUEST, 0,
+                                reinterpret_cast<LPARAM>(target))) {
+        delete target;
+        MessageBoxW(owner, L"输血结果查询页面打开失败。", WINDOW_TITLE, MB_ICONERROR);
+    }
+}
+
 void resizeLayout(HWND hwnd, BackupBloodState* st) {
     if (!st) return;
     RECT rc{};
@@ -761,6 +788,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const auto* info = reinterpret_cast<NMLISTVIEW*>(lp);
                 sortRows(st, info->iSubItem, true);
                 populateDetails(st);
+                return 0;
+            }
+            if (st && header->idFrom == IDC_DETAILS && header->code == NM_DBLCLK) {
+                const auto* item = reinterpret_cast<NMITEMACTIVATE*>(lp);
+                openBloodRequestForRow(hwnd, st, item->iItem);
                 return 0;
             }
             break;
