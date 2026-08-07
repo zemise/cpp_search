@@ -9,6 +9,8 @@ endif()
 
 project(lis_workbench LANGUAGES C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -161,6 +163,7 @@ add_executable(main_app WIN32
     src/emergency_statistics_module.cpp
     src/hiv_statistics_module.cpp
     src/immune_duplicate_statistics_module.cpp
+    src/massive_transfusion_statistics_module.cpp
     src/machine_picker_popup.cpp
     src/mchc_correction_module.cpp
     src/outpatient_query_module.cpp
@@ -216,6 +219,15 @@ if(MSVC)
 endif()
 if(MINGW)
     target_link_options(updater PRIVATE -municode -static -static-libgcc -static-libstdc++)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(massive_transfusion_core_tests
+        tests/massive_transfusion_statistics_test.cpp
+    )
+    target_include_directories(massive_transfusion_core_tests PRIVATE src)
+    target_link_libraries(massive_transfusion_core_tests PRIVATE search_core)
+    add_test(NAME massive_transfusion_core_tests COMMAND massive_transfusion_core_tests)
 endif()
 
 # ── Qt 5.15 frontend (opt-in) ─────────────────────────────────

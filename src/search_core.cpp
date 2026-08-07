@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <iomanip>
 #include <map>
 #include <mutex>
 #include <set>
@@ -3511,6 +3512,461 @@ bool query_backup_blood_statistics(const BackupBloodStatQuery& query,
     summary.total_count = static_cast<int>(rows.size());
     error.clear();
     return true;
+#endif
+}
+
+bool build_massive_transfusion_statistics(
+    const MassiveTransfusionStatQuery& query,
+    const std::vector<MassiveTransfusionRawRow>& raw_rows,
+    MassiveTransfusionStatSummary& summary,
+    std::vector<MassiveTransfusionEventRow>& events,
+    std::vector<MassiveTransfusionComponentDetailRow>& orphan_rejected,
+    std::string& error) {
+    summary = MassiveTransfusionStatSummary{};
+    events.clear();
+    orphan_rejected.clear();
+
+    const std::string start_date = trim(query.start_date);
+    const std::string end_date = trim(query.end_date);
+    if (start_date.size() != 10 || end_date.size() != 10 || start_date > end_date) {
+        error = "valid start_date and end_date are required";
+        return false;
+    }
+
+    const auto campus_for_dept = [](const std::string& dept) {
+        return contains_text(dept, "滨水") ? std::string("新院") : std::string("老院");
+    };
+    const std::string requested_campus = trim(query.campus);
+    const auto campus_matches = [&requested_campus](const std::string& campus) {
+        return (requested_campus != "老院" && requested_campus != "新院") ||
+               campus == requested_campus;
+    };
+    const auto format_number = [](double value) {
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(2) << value;
+        std::string text = out.str();
+        while (!text.empty() && text.back() == '0') text.pop_back();
+        if (!text.empty() && text.back() == '.') text.pop_back();
+        return text.empty() ? std::string("0") : text;
+    };
+    const auto parse_number = [](const std::string& text, double& value) {
+        const std::string input = trim(text);
+        if (input.empty()) return false;
+        char* end = nullptr;
+        value = std::strtod(input.c_str(), &end);
+        return end && *end == '\0' && value > 0.0;
+    };
+    const auto normalized_unit = [](std::string unit) {
+        unit = trim(unit);
+        for (char& ch : unit) {
+            const unsigned char value = static_cast<unsigned char>(ch);
+            if (value < 128) ch = static_cast<char>(std::toupper(value));
+        }
+        return unit;
+    };
+    const auto datetime_value = [](const std::string& text, std::time_t& value) {
+        std::tm parsed{};
+        if (!parse_sql_datetime(text, parsed)) return false;
+        value = std::mktime(&parsed);
+        return value != static_cast<std::time_t>(-1);
+    };
+    const auto format_datetime = [](std::time_t value) {
+        std::tm* parsed = std::localtime(&value);
+        if (!parsed) return std::string{};
+        char buffer[20]{};
+        std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", parsed);
+        return std::string(buffer);
+    };
+
+    struct Component {
+        std::string composition;
+        std::string apply_num;
+        std::string apply_unit;
+    };
+    struct Application {
+        std::string main_id;
+        std::string apply_form_no;
+        std::string patient_no;
+        std::string patient_no_type;
+        std::string patient_name;
+        std::string apply_time;
+        std::time_t time_value = 0;
+        bool valid_time = false;
+        std::string apply_status;
+        std::string apply_dept;
+        std::string bed_no;
+        std::string apply_doctor;
+        std::vector<Component> components;
+        std::set<std::string> component_keys;
+    };
+
+    std::map<std::string, Application> application_map;
+    std::set<std::string> missing_patient_keys;
+    std::set<std::string> missing_form_keys;
+    for (size_t raw_index = 0; raw_index < raw_rows.size(); ++raw_index) {
+        const auto& raw = raw_rows[raw_index];
+        const std::string campus = campus_for_dept(raw.apply_dept);
+        const std::string form_no = trim(raw.apply_form_no);
+        const std::string patient_no = trim(raw.patient_no);
+        const std::string physical_key = !trim(raw.main_id).empty()
+            ? trim(raw.main_id) : std::to_string(raw_index);
+        if (form_no.empty()) {
+            if (campus_matches(campus)) missing_form_keys.insert(physical_key);
+            continue;
+        }
+        if (patient_no.empty()) {
+            if (campus_matches(campus)) missing_patient_keys.insert(form_no);
+            continue;
+        }
+
+        auto found = application_map.find(form_no);
+        if (found == application_map.end()) {
+            Application app;
+            app.main_id = trim(raw.main_id);
+            app.apply_form_no = form_no;
+            app.patient_no = patient_no;
+            app.patient_no_type = trim(raw.patient_no_type);
+            app.patient_name = trim(raw.patient_name);
+            app.apply_time = trim(raw.apply_time);
+            app.valid_time = datetime_value(app.apply_time, app.time_value);
+            app.apply_status = trim(raw.apply_status);
+            app.apply_dept = trim(raw.apply_dept);
+            app.bed_no = trim(raw.bed_no);
+            app.apply_doctor = trim(raw.apply_doctor);
+            found = application_map.emplace(form_no, std::move(app)).first;
+        }
+        auto& app = found->second;
+        const std::string son_id = trim(raw.son_id);
+        if (!son_id.empty()) {
+            std::string component_key = son_id;
+            if (!app.component_keys.insert(component_key).second) continue;
+            Component component;
+            component.composition = trim(raw.composition);
+            component.apply_num = trim(raw.apply_num);
+            component.apply_unit = trim(raw.apply_unit);
+            app.components.push_back(std::move(component));
+        }
+    }
+    summary.missing_patient_no_count = static_cast<int>(missing_patient_keys.size());
+    summary.missing_apply_form_no_count = static_cast<int>(missing_form_keys.size());
+
+    std::map<std::string, std::vector<Application*>> effective_by_patient;
+    std::map<std::string, std::vector<Application*>> rejected_by_patient;
+    for (auto& pair : application_map) {
+        auto& app = pair.second;
+        if (!app.valid_time) continue;
+        if (app.apply_status == "已驳回") {
+            rejected_by_patient[app.patient_no].push_back(&app);
+        } else if (app.apply_status == "未审核" || app.apply_status == "已审核" ||
+                   app.apply_status == "已完结") {
+            effective_by_patient[app.patient_no].push_back(&app);
+        }
+    }
+    const auto app_order = [](const Application* left, const Application* right) {
+        if (left->time_value != right->time_value) return left->time_value < right->time_value;
+        if (left->apply_form_no != right->apply_form_no) return left->apply_form_no < right->apply_form_no;
+        return left->main_id < right->main_id;
+    };
+    for (auto& pair : effective_by_patient) std::sort(pair.second.begin(), pair.second.end(), app_order);
+    for (auto& pair : rejected_by_patient) std::sort(pair.second.begin(), pair.second.end(), app_order);
+
+    const auto make_component_detail = [&](const Application& app, const Component* component,
+                                           const std::string& event_id, bool counted) {
+        MassiveTransfusionComponentDetailRow detail;
+        detail.event_id = event_id;
+        detail.campus = campus_for_dept(app.apply_dept);
+        detail.patient_no = app.patient_no;
+        detail.patient_name = app.patient_name;
+        detail.apply_form_no = app.apply_form_no;
+        detail.apply_time = app.apply_time;
+        detail.apply_status = app.apply_status;
+        detail.apply_dept = app.apply_dept;
+        detail.bed_no = app.bed_no;
+        detail.apply_doctor = app.apply_doctor;
+        detail.counted = counted;
+        detail.rejected = app.apply_status == "已驳回";
+        if (!component) {
+            detail.counted = false;
+            detail.data_status = detail.rejected ? "已驳回，不计量；申请成分子表缺失" : "申请成分子表缺失";
+            return detail;
+        }
+        detail.composition = component->composition;
+        detail.apply_num = component->apply_num;
+        detail.apply_unit = component->apply_unit;
+        const bool is_platelet = contains_text(component->composition, "血小板");
+        const bool is_cryoprecipitate = contains_text(component->composition, "冷沉淀");
+        detail.excluded_by_component_filter =
+            !query.include_platelet_and_cryoprecipitate &&
+            (is_platelet || is_cryoprecipitate);
+        if (detail.excluded_by_component_filter) detail.counted = false;
+        const std::string unit = normalized_unit(component->apply_unit);
+        double factor = 0.0;
+        if (unit == "ML") factor = 1.0;
+        else if (unit == "U" && is_cryoprecipitate) factor = 20.0;
+        else if (unit == "U") factor = 200.0;
+        else if (unit == "治疗量") factor = 250.0;
+        double amount = 0.0;
+        const bool valid_amount = parse_number(component->apply_num, amount);
+        if (factor <= 0.0) {
+            detail.counted = false;
+            detail.data_status = "未识别申请单位";
+        } else if (!valid_amount) {
+            detail.counted = false;
+            detail.data_status = "申请量为空或无效";
+        } else {
+            detail.conversion_factor = format_number(factor);
+            detail.converted_ml = format_number(amount * factor);
+            if (detail.rejected) detail.data_status = "已驳回，不计量";
+            else if (detail.excluded_by_component_filter) detail.data_status = "未勾选，不计量";
+            else detail.data_status = "完整";
+        }
+        if (detail.rejected && detail.data_status != "已驳回，不计量") {
+            detail.data_status = "已驳回，不计量；" + detail.data_status;
+        } else if (detail.excluded_by_component_filter &&
+                   detail.data_status != "未勾选，不计量") {
+            detail.data_status = "未勾选，不计量；" + detail.data_status;
+        }
+        return detail;
+    };
+
+    std::vector<MassiveTransfusionEventRow> candidate_events;
+    for (auto& patient_pair : effective_by_patient) {
+        auto& apps = patient_pair.second;
+        size_t index = 0;
+        while (index < apps.size()) {
+            Application* anchor = apps[index];
+            const std::string anchor_date = date_from_sql_datetime(anchor->apply_time);
+            if (anchor_date < start_date) {
+                ++index;
+                continue;
+            }
+            if (anchor_date > end_date) break;
+            const std::time_t window_end = anchor->time_value + 24 * 60 * 60;
+            size_t next = index;
+            while (next < apps.size() && apps[next]->time_value < window_end) ++next;
+
+            MassiveTransfusionEventRow event;
+            event.event_id = anchor->patient_no + "@" + anchor->apply_time;
+            event.campus = campus_for_dept(anchor->apply_dept);
+            event.patient_no = anchor->patient_no;
+            event.patient_name = anchor->patient_name;
+            event.patient_no_type = anchor->patient_no_type;
+            event.first_apply_time = anchor->apply_time;
+            event.window_end_time = format_datetime(window_end);
+            event.last_apply_time = apps[next - 1]->apply_time;
+            event.first_apply_form_no = anchor->apply_form_no;
+            event.apply_dept = anchor->apply_dept;
+            event.bed_no = anchor->bed_no;
+            event.application_count = static_cast<int>(next - index);
+
+            std::set<std::string> statuses;
+            std::map<std::string, double> composition_totals;
+            double total_ml = 0.0;
+            for (size_t app_index = index; app_index < next; ++app_index) {
+                const Application& app = *apps[app_index];
+                if (!event.apply_form_nos.empty()) event.apply_form_nos += ";";
+                event.apply_form_nos += app.apply_form_no;
+                statuses.insert(app.apply_status);
+                if (app.components.empty()) {
+                    event.complete = false;
+                    ++event.issue_count;
+                    event.components.push_back(make_component_detail(app, nullptr, event.event_id, true));
+                    continue;
+                }
+                for (const auto& component : app.components) {
+                    auto detail = make_component_detail(app, &component, event.event_id, true);
+                    if (detail.excluded_by_component_filter) {
+                        event.components.push_back(std::move(detail));
+                        continue;
+                    }
+                    if (detail.converted_ml.empty()) {
+                        event.complete = false;
+                        ++event.issue_count;
+                    } else {
+                        ++event.component_count;
+                        const double converted = std::strtod(detail.converted_ml.c_str(), nullptr);
+                        total_ml += converted;
+                        composition_totals[detail.composition.empty() ? "未命名制品" : detail.composition] += converted;
+                    }
+                    event.components.push_back(std::move(detail));
+                }
+            }
+            event.total_ml = format_number(total_ml);
+            event.qualifies = total_ml >= 1600.0;
+            for (const auto& status : statuses) {
+                if (!event.status_summary.empty()) event.status_summary += "/";
+                event.status_summary += status;
+            }
+            for (const auto& item : composition_totals) {
+                if (!event.composition_summary.empty()) event.composition_summary += ";";
+                event.composition_summary += item.first + " " + format_number(item.second) + "ml";
+            }
+            event.data_status = event.complete ? "完整" : "总量不完整";
+            if (event.qualifies || !event.complete) candidate_events.push_back(std::move(event));
+            index = next;
+        }
+    }
+
+    std::set<std::string> attached_rejected_forms;
+    for (auto& event : candidate_events) {
+        auto rejected_it = rejected_by_patient.find(event.patient_no);
+        if (rejected_it == rejected_by_patient.end()) continue;
+        std::time_t start_value = 0;
+        std::time_t end_value = 0;
+        if (!datetime_value(event.first_apply_time, start_value) ||
+            !datetime_value(event.window_end_time, end_value)) continue;
+        for (const Application* rejected : rejected_it->second) {
+            if (rejected->time_value < start_value || rejected->time_value >= end_value) continue;
+            if (!attached_rejected_forms.insert(rejected->apply_form_no).second) continue;
+            ++event.rejected_application_count;
+            if (!event.apply_form_nos.empty()) event.apply_form_nos += ";";
+            event.apply_form_nos += rejected->apply_form_no + "(已驳回)";
+            if (event.status_summary.find("已驳回") == std::string::npos) {
+                if (!event.status_summary.empty()) event.status_summary += "/";
+                event.status_summary += "已驳回(不计量)";
+            }
+            if (rejected->components.empty()) {
+                event.components.push_back(make_component_detail(*rejected, nullptr, event.event_id, false));
+            } else {
+                for (const auto& component : rejected->components) {
+                    event.components.push_back(make_component_detail(*rejected, &component, event.event_id, false));
+                }
+            }
+        }
+    }
+
+    for (const auto& rejected_pair : rejected_by_patient) {
+        for (const Application* rejected : rejected_pair.second) {
+            if (attached_rejected_forms.count(rejected->apply_form_no) != 0) continue;
+            const std::string rejected_date = date_from_sql_datetime(rejected->apply_time);
+            if (rejected_date < start_date || rejected_date > end_date) continue;
+            const std::string campus = campus_for_dept(rejected->apply_dept);
+            if (!campus_matches(campus)) continue;
+            if (rejected->components.empty()) {
+                orphan_rejected.push_back(make_component_detail(*rejected, nullptr, "", false));
+            } else {
+                for (const auto& component : rejected->components) {
+                    orphan_rejected.push_back(make_component_detail(*rejected, &component, "", false));
+                }
+            }
+        }
+    }
+
+    std::set<std::string> qualifying_patients;
+    std::set<std::string> rejected_forms;
+    for (auto& event : candidate_events) {
+        if (!campus_matches(event.campus)) continue;
+        if (event.qualifies) {
+            ++summary.event_count;
+            qualifying_patients.insert(event.patient_no);
+            summary.application_count += event.application_count;
+            summary.component_count += event.component_count;
+            summary.total_ml += std::strtod(event.total_ml.c_str(), nullptr);
+        }
+        if (!event.complete) {
+            ++summary.issue_event_count;
+            summary.issue_component_count += event.issue_count;
+        }
+        for (const auto& component : event.components) {
+            if (component.rejected) rejected_forms.insert(component.apply_form_no);
+        }
+        events.push_back(std::move(event));
+    }
+    for (const auto& component : orphan_rejected) rejected_forms.insert(component.apply_form_no);
+    summary.patient_count = static_cast<int>(qualifying_patients.size());
+    summary.rejected_application_count = static_cast<int>(rejected_forms.size());
+
+    std::sort(events.begin(), events.end(), [](const auto& left, const auto& right) {
+        return left.first_apply_time > right.first_apply_time;
+    });
+    error.clear();
+    return true;
+}
+
+bool query_massive_transfusion_statistics(
+    const MassiveTransfusionStatQuery& query,
+    MassiveTransfusionStatSummary& summary,
+    std::vector<MassiveTransfusionEventRow>& events,
+    std::vector<MassiveTransfusionComponentDetailRow>& orphan_rejected,
+    std::string& error, LogFn log) {
+#ifndef _WIN32
+    (void)query;
+    (void)summary;
+    (void)events;
+    (void)orphan_rejected;
+    (void)log;
+    error = "query_massive_transfusion_statistics is only available on Windows";
+    return false;
+#else
+    const std::string start_date = trim(query.start_date);
+    const std::string end_date = trim(query.end_date);
+    if (start_date.size() != 10 || end_date.size() != 10 || start_date > end_date) {
+        error = "valid start_date and end_date are required";
+        return false;
+    }
+    DbContext db;
+    if (!connect(query.connection_string, db, error, log)) return false;
+
+    std::ostringstream sql;
+    sql << "SELECT "
+        << "CONVERT(varchar(32),a.ID),"
+        << "isnull(LTRIM(RTRIM(a.ApplyFormNO)),''),"
+        << "isnull(LTRIM(RTRIM(a.Patient_NO)),''),"
+        << "isnull(LTRIM(RTRIM(a.Patient_NOType)),''),"
+        << "isnull(LTRIM(RTRIM(a.Patient_Name)),''),"
+        << "isnull(LTRIM(RTRIM(a.Patient_Sex)),''),"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(20),a.Patient_Age))),'')+isnull(LTRIM(RTRIM(a.Patient_AgeUnit)),''),"
+        << "isnull(CONVERT(varchar(19),a.Apply_Time,120),''),"
+        << "isnull(LTRIM(RTRIM(a.ApplyForm_Statue)),''),"
+        << "isnull(LTRIM(RTRIM(a.Apply_Dept)),''),"
+        << "isnull(CONVERT(varchar(32),a.Apply_DeptID),''),"
+        << "isnull(LTRIM(RTRIM(a.Apply_BedNo)),''),"
+        << "isnull(LTRIM(RTRIM(a.Apply_Doctor)),''),"
+        << "isnull(CONVERT(varchar(32),s.ID),''),"
+        << "isnull(LTRIM(RTRIM(s.SonGuid)),''),"
+        << "isnull(LTRIM(RTRIM(s.ApplyComposition)),''),"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(32),s.ApplyNum))),''),"
+        << "isnull(LTRIM(RTRIM(s.ApplyUnit)),''),"
+        << "isnull(CONVERT(varchar(32),s.CompositionBig_ID),'')"
+        << " FROM LS_XK_BloodRequestApply a WITH (NOLOCK)"
+        << " LEFT JOIN LS_XK_BloodRequestApplySon s WITH (NOLOCK)"
+        << " ON s.ApplyFormNO=a.ApplyFormNO"
+        << " WHERE a.Apply_Time>='" << sql_escape(start_date) << "'"
+        << " AND a.Apply_Time<DATEADD(day,2,'" << sql_escape(end_date) << "')"
+        << " AND isnull(a.Delete_Bit,0)=0"
+        << " AND LTRIM(RTRIM(isnull(a.ApplyForm_Statue,'')))<>'已删除'"
+        << " ORDER BY a.Patient_NO,a.Apply_Time,a.ApplyFormNO,s.ID";
+    if (log) log("exec sql: " + sql.str() + "\n");
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!exec_query(db.dbc, sql.str(), stmt, error)) return false;
+    std::vector<MassiveTransfusionRawRow> raw_rows;
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        MassiveTransfusionRawRow row;
+        row.main_id = fetch_column(stmt, 1);
+        row.apply_form_no = fetch_column(stmt, 2);
+        row.patient_no = fetch_column(stmt, 3);
+        row.patient_no_type = fetch_column(stmt, 4);
+        row.patient_name = fetch_column(stmt, 5);
+        row.patient_sex = fetch_column(stmt, 6);
+        row.patient_age = fetch_column(stmt, 7);
+        row.apply_time = fetch_column(stmt, 8);
+        row.apply_status = fetch_column(stmt, 9);
+        row.apply_dept = fetch_column(stmt, 10);
+        row.apply_dept_id = fetch_column(stmt, 11);
+        row.bed_no = fetch_column(stmt, 12);
+        row.apply_doctor = fetch_column(stmt, 13);
+        row.son_id = fetch_column(stmt, 14);
+        row.son_guid = fetch_column(stmt, 15);
+        row.composition = fetch_column(stmt, 16);
+        row.apply_num = fetch_column(stmt, 17);
+        row.apply_unit = fetch_column(stmt, 18);
+        row.composition_big_id = fetch_column(stmt, 19);
+        raw_rows.push_back(std::move(row));
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    return build_massive_transfusion_statistics(query, raw_rows, summary, events,
+                                                orphan_rejected, error);
 #endif
 }
 
