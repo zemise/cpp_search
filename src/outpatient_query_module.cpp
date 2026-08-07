@@ -296,15 +296,18 @@ void showCellContextMenu(HWND hwnd, OutpatientQueryState* st) {
     ListView_SetItemState(st->list, row, LVIS_SELECTED | LVIS_FOCUSED,
                           LVIS_SELECTED | LVIS_FOCUSED);
 
+    const std::wstring text = search::utf8_to_wide(
+        sortValue(st->rows[static_cast<size_t>(row)], hit.iSubItem));
+    const std::wstring menuLabel = search::copy_menu_label(text);
+
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
-    AppendMenuW(menu, MF_STRING, IDM_COPY_CELL, L"复制单元格");
+    AppendMenuW(menu, MF_STRING, IDM_COPY_CELL, menuLabel.c_str());
     const UINT command = TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
                                         screenPt.x, screenPt.y, 0, hwnd, nullptr);
     DestroyMenu(menu);
     if (command != IDM_COPY_CELL) return;
 
-    const std::wstring text = search::utf8_to_wide(sortValue(st->rows[static_cast<size_t>(row)], hit.iSubItem));
     if (copyTextToClipboard(hwnd, text)) {
         setStatus(st, L"已复制单元格：" + std::wstring(COLUMNS[hit.iSubItem].title));
     } else {

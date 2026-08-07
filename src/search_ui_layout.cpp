@@ -111,6 +111,27 @@ void add_list_column(HWND list, int index, const wchar_t* title, int width) {
     ListView_InsertColumn(list, index, &col);
 }
 
+std::wstring copy_menu_label(const std::wstring& text) {
+    constexpr size_t MAX_PREVIEW_CHARS = 48;
+    std::wstring preview = text;
+    for (wchar_t& ch : preview) {
+        if (ch == L'\r' || ch == L'\n' || ch == L'\t') ch = L' ';
+    }
+    if (preview.empty()) preview = L"（空白）";
+    if (preview.size() > MAX_PREVIEW_CHARS) {
+        preview.resize(MAX_PREVIEW_CHARS);
+        preview += L"…";
+    }
+
+    std::wstring escaped;
+    escaped.reserve(preview.size());
+    for (const wchar_t ch : preview) {
+        escaped.push_back(ch);
+        if (ch == L'&') escaped.push_back(L'&');
+    }
+    return L"复制：" + escaped;
+}
+
 void create_main_controls(HWND hwnd, HFONT font, const MainUiIds& ids, MainUiHandles& ui) {
     const float s = dpi_scale_factor(hwnd);
     auto S = [s](int v) { return static_cast<int>(v * s); };

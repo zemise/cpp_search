@@ -57,9 +57,10 @@ constexpr int IDC_EXPORT = 4118;
 constexpr int IDC_LIST = 4120;
 constexpr int IDC_STATUS = 4121;
 constexpr int IDC_DROPDOWN_LIST = 4510;
-constexpr int FIRST_DATA_COLUMN = 1;
-constexpr int LAST_SHARED_BARCODE_COLUMN = 8;
-constexpr int LAST_DATA_COLUMN = 27;
+constexpr int FIRST_DATA_COLUMN = 0;
+constexpr int FIRST_SHARED_BARCODE_COLUMN = 0;
+constexpr int LAST_SHARED_BARCODE_COLUMN = 7;
+constexpr int LAST_DATA_COLUMN = 26;
 constexpr UINT IDM_COPY_CELL = 41201;
 const COLORREF COLOR_NOT_MACHINE = RGB(0xFF, 0xFF, 0x54);
 const COLORREF COLOR_LOADED_NOT_REVIEWED = RGB(0xFF, 0xFF, 0xFF);
@@ -114,22 +115,22 @@ struct ListColumn {
 };
 
 const ListColumn BARCODE_COLUMNS[] = {
-    {0, L"", 24},
-    {1, L"样本号", 58},
-    {2, L"急诊", 44},
-    {3, L"条形码", 104},
-    {4, L"病人号", 90},
-    {5, L"类型", 56},
-    {6, L"姓名", 86},
-    {7, L"性别", 48},
-    {8, L"申请科室", 110},
-    {9, L"床号", 70},
-    {10, L"签收人", 100},
-    {11, L"签收时间", 150},
-    {12, L"医嘱内容", 230},
-    {13, L"标本", 72},
-    {14, L"检验者", 80},
-    {15, L"审核者", 80},
+    {0, L"样本号", 58},
+    {1, L"急诊", 44},
+    {2, L"条形码", 104},
+    {3, L"病人号", 90},
+    {4, L"类型", 56},
+    {5, L"姓名", 86},
+    {6, L"性别", 48},
+    {7, L"申请科室", 110},
+    {8, L"床号", 70},
+    {9, L"签收人", 100},
+    {10, L"签收时间", 150},
+    {11, L"医嘱内容", 230},
+    {12, L"标本", 72},
+    {13, L"检验者", 80},
+    {14, L"审核者", 80},
+    {15, L"上机状态", 112},
     {16, L"费用", 76},
     {17, L"申请医生", 90},
     {18, L"状态", 66},
@@ -141,7 +142,6 @@ const ListColumn BARCODE_COLUMNS[] = {
     {24, L"取消时间", 140},
     {25, L"取消人", 82},
     {26, L"HZID", 70},
-    {27, L"上机状态", 112},
 };
 
 void runQuery(HWND hwnd, BarcodeState* st);
@@ -971,6 +971,7 @@ void insertRow(HWND list, int index, const search::BarcodeQueryRow& row,
         &row.sample_name,
         &row.tester,
         &row.reviewer,
+        &row.machine_status,
         &row.fee,
         &row.request_doctor,
         &row.status,
@@ -982,33 +983,35 @@ void insertRow(HWND list, int index, const search::BarcodeQueryRow& row,
         &row.cancel_time,
         &row.cancel_operator,
         &row.hzid,
-        &row.machine_status,
     };
     const int cellCount = static_cast<int>(sizeof(cells) / sizeof(cells[0]));
-    for (int col = 1; col <= cellCount; ++col) {
-        const bool hideCell = hideRepeatedBarcodeFields && col <= LAST_SHARED_BARCODE_COLUMN;
-        setCell(list, index, col, hideCell ? std::string() : *cells[col - 1]);
+    for (int col = 0; col < cellCount; ++col) {
+        const bool sharedBarcodeColumn =
+            col >= FIRST_SHARED_BARCODE_COLUMN && col <= LAST_SHARED_BARCODE_COLUMN;
+        const bool hideCell = hideRepeatedBarcodeFields && sharedBarcodeColumn;
+        setCell(list, index, col, hideCell ? std::string() : *cells[col]);
     }
 }
 
 const std::string& barcodeSortValue(const search::BarcodeQueryRow& row, int col) {
     static const std::string empty;
     switch (col) {
-        case 1: return row.sample_no;
-        case 2: return row.emergency;
-        case 3: return row.barcode;
-        case 4: return row.reg_no;
-        case 5: return row.type_name;
-        case 6: return row.name;
-        case 7: return row.sex;
-        case 8: return row.dept_name;
-        case 9: return row.bed_no;
-        case 10: return row.receiver;
-        case 11: return row.receive_time;
-        case 12: return row.order_text;
-        case 13: return row.sample_name;
-        case 14: return row.tester;
-        case 15: return row.reviewer;
+        case 0: return row.sample_no;
+        case 1: return row.emergency;
+        case 2: return row.barcode;
+        case 3: return row.reg_no;
+        case 4: return row.type_name;
+        case 5: return row.name;
+        case 6: return row.sex;
+        case 7: return row.dept_name;
+        case 8: return row.bed_no;
+        case 9: return row.receiver;
+        case 10: return row.receive_time;
+        case 11: return row.order_text;
+        case 12: return row.sample_name;
+        case 13: return row.tester;
+        case 14: return row.reviewer;
+        case 15: return row.machine_status;
         case 16: return row.fee;
         case 17: return row.request_doctor;
         case 18: return row.status;
@@ -1020,7 +1023,6 @@ const std::string& barcodeSortValue(const search::BarcodeQueryRow& row, int col)
         case 24: return row.cancel_time;
         case 25: return row.cancel_operator;
         case 26: return row.hzid;
-        case 27: return row.machine_status;
         default: return empty;
     }
 }
@@ -1207,16 +1209,18 @@ void showCellContextMenu(HWND hwnd, BarcodeState* st) {
     ListView_SetItemState(st->list, row, LVIS_SELECTED | LVIS_FOCUSED,
                           LVIS_SELECTED | LVIS_FOCUSED);
 
+    const std::wstring text = search::utf8_to_wide(
+        barcodeSortValue(st->rows[static_cast<size_t>(row)], hit.iSubItem));
+    const std::wstring menuLabel = search::copy_menu_label(text);
+
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
-    AppendMenuW(menu, MF_STRING, IDM_COPY_CELL, L"复制单元格");
+    AppendMenuW(menu, MF_STRING, IDM_COPY_CELL, menuLabel.c_str());
     const UINT command = TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
                                         screenPt.x, screenPt.y, 0, hwnd, nullptr);
     DestroyMenu(menu);
     if (command != IDM_COPY_CELL) return;
 
-    const std::wstring text = search::utf8_to_wide(
-        barcodeSortValue(st->rows[static_cast<size_t>(row)], hit.iSubItem));
     if (copyTextToClipboard(hwnd, text)) {
         setStatus(st, L"已复制单元格：" + std::wstring(BARCODE_COLUMNS[hit.iSubItem].title));
     } else {

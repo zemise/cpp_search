@@ -4,6 +4,8 @@
 
 #include <windows.h>
 
+#include <string>
+
 namespace search {
 
 struct MainUiIds {
@@ -78,6 +80,7 @@ HWND create_combo(HWND parent, int id, int x, int y, int w, int h, bool editable
 HWND create_password_edit(HWND parent, int id, int x, int y, int w, int h);
 HWND create_button(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h);
 void add_list_column(HWND list, int index, const wchar_t* title, int width);
+std::wstring copy_menu_label(const std::wstring& text);
 
 void create_main_controls(HWND hwnd, HFONT font, const MainUiIds& ids, MainUiHandles& ui);
 void layout_main_window(HWND hwnd, MainUiHandles& ui, int& splitter_x);
