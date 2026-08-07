@@ -25,6 +25,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -57,6 +58,7 @@ constexpr int IDC_LIST = 4120;
 constexpr int IDC_STATUS = 4121;
 constexpr int IDC_DROPDOWN_LIST = 4510;
 constexpr int FIRST_DATA_COLUMN = 1;
+constexpr int LAST_SHARED_BARCODE_COLUMN = 8;
 constexpr int LAST_DATA_COLUMN = 27;
 constexpr UINT IDM_COPY_CELL = 41201;
 const COLORREF COLOR_NOT_MACHINE = RGB(0xFF, 0xFF, 0x54);
@@ -913,7 +915,7 @@ void createControls(HWND hwnd, BarcodeState* st) {
         addColumn(st->list, column.index, column.title, S(column.width));
     }
 
-    st->status = leftLabel(hwnd, L"", S(8), S(546), S(900), S(24));
+    st->status = leftLabel(hwnd, L"", S(116), S(92), S(900), S(24));
 
     fillStaticCombos(st);
     setToday(st->startDate, false);
@@ -931,14 +933,13 @@ void layout(HWND hwnd, BarcodeState* st) {
     const float s = search::dpi_scale_factor(hwnd);
     auto S = [s](int v) { return static_cast<int>(v * s); };
     const int listTop = S(120);
-    const int statusH = S(24);
     const int clientW = static_cast<int>(rc.right);
     const int clientH = static_cast<int>(rc.bottom);
+    MoveWindow(st->status, S(116), S(92),
+               (std::max)(S(300), clientW - S(124)), S(24), TRUE);
     MoveWindow(st->list, S(4), listTop,
                (std::max)(S(300), clientW - S(8)),
-               (std::max)(S(160), clientH - listTop - statusH - S(8)), TRUE);
-    MoveWindow(st->status, S(8), clientH - statusH - S(4),
-               (std::max)(S(300), clientW - S(16)), statusH, TRUE);
+               (std::max)(S(160), clientH - listTop - S(4)), TRUE);
 }
 
 void setCell(HWND list, int row, int col, const std::string& text) {
@@ -946,7 +947,8 @@ void setCell(HWND list, int row, int col, const std::string& text) {
     ListView_SetItemText(list, row, col, const_cast<wchar_t*>(wide.c_str()));
 }
 
-void insertRow(HWND list, int index, const search::BarcodeQueryRow& row) {
+void insertRow(HWND list, int index, const search::BarcodeQueryRow& row,
+               bool hideRepeatedBarcodeFields) {
     LVITEMW item{};
     item.mask = LVIF_TEXT;
     item.iItem = index;
@@ -984,7 +986,8 @@ void insertRow(HWND list, int index, const search::BarcodeQueryRow& row) {
     };
     const int cellCount = static_cast<int>(sizeof(cells) / sizeof(cells[0]));
     for (int col = 1; col <= cellCount; ++col) {
-        setCell(list, index, col, *cells[col - 1]);
+        const bool hideCell = hideRepeatedBarcodeFields && col <= LAST_SHARED_BARCODE_COLUMN;
+        setCell(list, index, col, hideCell ? std::string() : *cells[col - 1]);
     }
 }
 
@@ -1060,15 +1063,62 @@ void updateExportButton(BarcodeState* st) {
     EnableWindow(st->exportExcel, !st->rows.empty());
 }
 
+std::string barcodeGroupKey(const search::BarcodeQueryRow& row) {
+    return search::trim(row.barcode);
+}
+
+bool sameNonEmptyBarcodeGroup(const search::BarcodeQueryRow& left,
+                              const search::BarcodeQueryRow& right) {
+    const std::string leftKey = barcodeGroupKey(left);
+    return !leftKey.empty() && leftKey == barcodeGroupKey(right);
+}
+
+void groupBarcodeRowsForDisplay(std::vector<search::BarcodeQueryRow>& rows) {
+    struct BarcodeRowGroup {
+        std::vector<search::BarcodeQueryRow> rows;
+    };
+
+    std::vector<BarcodeRowGroup> groups;
+    groups.reserve(rows.size());
+    std::unordered_map<std::string, size_t> groupIndexes;
+    groupIndexes.reserve(rows.size());
+
+    for (auto& row : rows) {
+        const std::string barcode = barcodeGroupKey(row);
+        if (barcode.empty()) {
+            BarcodeRowGroup group;
+            group.rows.push_back(std::move(row));
+            groups.push_back(std::move(group));
+            continue;
+        }
+
+        const auto inserted = groupIndexes.emplace(barcode, groups.size());
+        if (inserted.second) {
+            groups.push_back(BarcodeRowGroup{});
+        }
+        groups[inserted.first->second].rows.push_back(std::move(row));
+    }
+
+    rows.clear();
+    for (auto& group : groups) {
+        for (auto& row : group.rows) {
+            rows.push_back(std::move(row));
+        }
+    }
+}
+
 void sortBarcodeRowsForDisplay(BarcodeState* st) {
-    if (!st || st->listSortColumn < FIRST_DATA_COLUMN || st->listSortColumn > LAST_DATA_COLUMN) return;
-    const int col = st->listSortColumn;
-    const bool ascending = st->listSortAscending;
-    std::stable_sort(st->rows.begin(), st->rows.end(),
-                     [col, ascending](const auto& a, const auto& b) {
-                         const int cmp = compareBarcodeSortValue(a, b, col);
-                         return ascending ? cmp < 0 : cmp > 0;
-                     });
+    if (!st) return;
+    if (st->listSortColumn >= FIRST_DATA_COLUMN && st->listSortColumn <= LAST_DATA_COLUMN) {
+        const int col = st->listSortColumn;
+        const bool ascending = st->listSortAscending;
+        std::stable_sort(st->rows.begin(), st->rows.end(),
+                         [col, ascending](const auto& a, const auto& b) {
+                             const int cmp = compareBarcodeSortValue(a, b, col);
+                             return ascending ? cmp < 0 : cmp > 0;
+                         });
+    }
+    groupBarcodeRowsForDisplay(st->rows);
 }
 
 void presentRows(BarcodeState* st) {
@@ -1076,7 +1126,9 @@ void presentRows(BarcodeState* st) {
     SendMessageW(st->list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(st->list);
     for (size_t i = 0; i < st->rows.size(); ++i) {
-        insertRow(st->list, static_cast<int>(i), st->rows[i]);
+        const bool repeatedBarcode = i > 0 &&
+            sameNonEmptyBarcodeGroup(st->rows[i - 1], st->rows[i]);
+        insertRow(st->list, static_cast<int>(i), st->rows[i], repeatedBarcode);
     }
     SendMessageW(st->list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(st->list, nullptr, TRUE);
