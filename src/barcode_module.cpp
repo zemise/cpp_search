@@ -44,6 +44,7 @@ constexpr int IDC_NAME = 4105;
 constexpr int IDC_REG_NO = 4106;
 constexpr int IDC_MACHINE_STATUS = 4107;
 constexpr int IDC_ROOM = 4108;
+constexpr int IDC_CAMPUS = 4109;
 constexpr int IDC_NOT_CANCELED = 4110;
 constexpr int IDC_CANCELED = 4111;
 constexpr int IDC_QUERY = 4112;
@@ -71,8 +72,9 @@ struct BarcodeState {
     HWND barcode = nullptr;
     HWND name = nullptr;
     HWND regNo = nullptr;
-    HWND machineStatus = nullptr;
+    HWND campus = nullptr;
     HWND room = nullptr;
+    HWND machineStatus = nullptr;
     HWND notCanceled = nullptr;
     HWND canceled = nullptr;
     HWND query = nullptr;
@@ -85,6 +87,7 @@ struct BarcodeState {
     HWND list = nullptr;
     HWND status = nullptr;
     HBRUSH bgBrush = nullptr;
+    std::vector<search::RoomOption> allRooms;
     std::vector<search::RoomOption> rooms;
     std::vector<search::BarcodeQueryRow> rows;
     std::vector<std::string> selectedRoomCodes;
@@ -192,16 +195,51 @@ void fillStaticCombos(BarcodeState* st) {
     addComboItem(st->dateField, L"签收日期");
     addComboItem(st->dateField, L"上机日期");
     SendMessageW(st->dateField, CB_SETCURSEL, 1, 0);
+
+    addComboItem(st->campus, L"全部");
+    addComboItem(st->campus, L"老院");
+    addComboItem(st->campus, L"新院");
+    SendMessageW(st->campus, CB_SETCURSEL, 0, 0);
+}
+
+void filterRoomsForCampus(BarcodeState* st) {
+    if (!st) return;
+    const std::string campus = comboText(st->campus);
+    std::string deptCode;
+    if (campus == "老院") {
+        deptCode = "102";
+    } else if (campus == "新院") {
+        deptCode = "401";
+    }
+
+    st->rooms.clear();
+    for (const auto& room : st->allRooms) {
+        const std::string roomDeptCode = search::trim(room.dept_code);
+        if (deptCode.empty() || roomDeptCode == deptCode) {
+            st->rooms.push_back(room);
+        }
+    }
+
+    st->selectedRoomCodes.erase(
+        std::remove_if(st->selectedRoomCodes.begin(), st->selectedRoomCodes.end(),
+                       [st](const std::string& selected) {
+                           return std::none_of(st->rooms.begin(), st->rooms.end(),
+                                               [&selected](const search::RoomOption& room) {
+                                                   return search::trim(room.room_code) == search::trim(selected);
+                                               });
+                       }),
+        st->selectedRoomCodes.end());
 }
 
 void loadRooms(BarcodeState* st) {
-    st->rooms.clear();
+    st->allRooms.clear();
 
     const auto conn = search::wide_to_utf8(search::build_connection_string_w(st->ctx.dbSettings));
     if (!conn.empty()) {
         std::string error;
-        search::query_rooms(conn, st->rooms, error);
+        search::query_barcode_rooms(conn, st->allRooms, error);
     }
+    filterRoomsForCampus(st);
 }
 
 HWND label(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
@@ -339,6 +377,8 @@ std::wstring defaultExportFilename(BarcodeState* st) {
     if (!dateField.empty()) filename += "-" + dateField;
     if (!start.empty()) filename += "-" + start;
     if (!end.empty() && end != start) filename += "至" + end;
+    const std::string campus = sanitizeFilenamePart(comboText(st->campus));
+    if (!campus.empty()) filename += "-" + campus;
     filename += ".csv";
     return search::utf8_to_wide(filename);
 }
@@ -827,19 +867,21 @@ void createControls(HWND hwnd, BarcodeState* st) {
     label(hwnd, L"至", S(268), S(11), S(20), S(22));
     st->endDate = dateTimePicker(hwnd, IDC_END_DATE, S(292), S(8), S(160), S(24));
     label(hwnd, L"条形码", S(456), S(11), S(58), S(22));
-    st->barcode = search::create_edit(hwnd, IDC_BARCODE, S(518), S(8), S(140), S(24));
+    st->barcode = search::create_edit(hwnd, IDC_BARCODE, S(518), S(8), S(106), S(24));
     SetWindowSubclass(st->barcode, searchEditProc, 1, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"姓  名", S(662), S(11), S(58), S(22));
-    st->name = search::create_edit(hwnd, IDC_NAME, S(724), S(8), S(96), S(24));
+    label(hwnd, L"姓  名", S(628), S(11), S(54), S(22));
+    st->name = search::create_edit(hwnd, IDC_NAME, S(686), S(8), S(72), S(24));
     SetWindowSubclass(st->name, searchEditProc, 2, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"病人号", S(824), S(11), S(58), S(22));
-    st->regNo = search::create_edit(hwnd, IDC_REG_NO, S(886), S(8), S(124), S(24));
+    label(hwnd, L"病人号", S(762), S(11), S(54), S(22));
+    st->regNo = search::create_edit(hwnd, IDC_REG_NO, S(820), S(8), S(95), S(24));
     SetWindowSubclass(st->regNo, searchEditProc, 3, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"专业组", S(1014), S(11), S(46), S(22));
-    st->room = dropdownButton(hwnd, IDC_ROOM, L"全部", S(1064), S(8), S(120), S(24));
+    label(hwnd, L"院区", S(919), S(11), S(38), S(22));
+    st->campus = search::create_combo(hwnd, IDC_CAMPUS, S(961), S(8), S(70), S(120), false);
+    label(hwnd, L"专业组", S(1035), S(11), S(46), S(22));
+    st->room = dropdownButton(hwnd, IDC_ROOM, L"全部", S(1085), S(8), S(105), S(24));
     SetWindowSubclass(st->room, dropdownButtonProc, 1, reinterpret_cast<DWORD_PTR>(hwnd));
-    label(hwnd, L"上机状态", S(1188), S(11), S(72), S(22));
-    st->machineStatus = dropdownButton(hwnd, IDC_MACHINE_STATUS, L"全部", S(1264), S(8), S(150), S(24));
+    label(hwnd, L"上机状态", S(1194), S(11), S(68), S(22));
+    st->machineStatus = dropdownButton(hwnd, IDC_MACHINE_STATUS, L"全部", S(1266), S(8), S(140), S(24));
     SetWindowSubclass(st->machineStatus, dropdownButtonProc, 2, reinterpret_cast<DWORD_PTR>(hwnd));
 
     st->notCanceled = CreateWindowExW(0, L"BUTTON", L"未取消签收", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
@@ -1140,6 +1182,7 @@ search::BarcodeQueryFilters collectFilters(BarcodeState* st) {
     f.barcode = textOf(st->barcode);
     f.patient_name = textOf(st->name);
     f.reg_no = textOf(st->regNo);
+    f.campus = comboText(st->campus);
     if (!allStatusesSelected(st)) {
         f.machine_statuses = st->selectedMachineStatuses;
     }
@@ -1186,7 +1229,8 @@ void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult
     sortBarcodeRowsForDisplay(st);
     presentRows(st);
     updateExportButton(st);
-    setStatus(st, L"查询完成：专业组 " + roomSummary(st) +
+    setStatus(st, L"查询完成：院区 " + search::utf8_to_wide(comboText(st->campus)) +
+              L"，专业组 " + roomSummary(st) +
               L"，上机状态 " + statusSummary(st) +
               L"，共 " + std::to_wstring(st->rows.size()) + L" 条。");
 }
@@ -1283,6 +1327,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND:
             if (!st) break;
             switch (LOWORD(wp)) {
+                case IDC_CAMPUS:
+                    if (HIWORD(wp) == CBN_SELCHANGE) {
+                        filterRoomsForCampus(st);
+                        updateFilterButtonText(st);
+                    }
+                    return 0;
                 case IDC_ROOM:
                     openRoomDropdown(hwnd, st);
                     return 0;

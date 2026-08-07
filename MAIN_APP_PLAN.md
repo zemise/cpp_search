@@ -62,7 +62,7 @@ LIS 工作台
 | 2.1 检验结果查询接入 | `query_module.cpp` — 检验结果查询单实例 MDI 子窗口 + QueryState 每实例独立 + 通用拖条控件 + 分割器持久化 | ✅ |
 | 2.2 输血结果查询模块 | `blood_module.cpp` — 独立 `BloodModuleChild` 类，接入 `LS_XK_BloodRequestApply` 只读查询；支持病人编号、病人姓名、申请单号、申请状态、申请日期过滤，其中申请状态按 `ApplyForm_Statue` 中文值匹配；LIS 结果弹窗中组合项目列表和摘要信息独立后台查询 | ✅ |
 | 2.3 系统设置接入 | `main_frame.cpp` — 复用 `MdiPlaceholderChild` 类 + 设置表单控件 + 单实例模式 | ✅ |
-| 2.4 已签收条码查询模块 | `barcode_module.cpp` — 接入 `LS_AS_BARCODE` 只读查询，支持日期、条形码、姓名、病人号、上机状态、专业组和取消签收状态过滤；业务修改按钮保持禁用 | ✅ |
+| 2.4 已签收条码查询模块 | `barcode_module.cpp` — 接入 `LS_AS_BARCODE` 只读查询，支持日期、条形码、姓名、病人号、院区、专业组、上机状态和取消签收状态过滤；院区按申请科室派生，专业组按 `LS_AS_ROOM.Dept_Code=102/401` 与院区联动；业务修改按钮保持禁用 | ✅ |
 | 2.5 常规报告模块 | `regular_report_module.cpp` — 按 `temp/模版2.png` 基本完成三栏报告工作台；支持按检验日期和检验仪器查询 `LS_AS_REPORT`，右侧选中行回填左侧信息并联动中间项目明细；中间组合项目按 `LS_AS_REPENTRY.GROUP_CODE -> LS_AS_LABMATCH.GROUP_NAME` 显示，图象页按 `REP_NO` 按需展示 `LS_AS_ITEMPICTURE.PICTURE` 并通过滚动视口查看大图；底部 `图形(T)` 可按当前选中报告打开独立结果图窗口，跟随右侧选中行刷新，并保存弹窗尺寸；右侧列表支持本地排序、首末行跳转、今天/前一天/后一天快捷切换检验日期、样本号回车定位、顶部动态统计、保留状态刷新和勾选批量打印；底部 `1/2/3` 可按系统设置快速切换检验仪器；右侧行右键菜单接入 `LabelPrint` 执行 `打印条码`，条码组合项目取中间明细组合项目而非右侧项目名称，打印机型号和 TSPL/ZPL 后端由 LabelPrint 统一入口选择；构建时优先 `find_package(LabelPrint 1.2)`，再回退本地源码；中间/右侧拖条可调整并持久化；左侧滚动表单采用自绘分组框 + 内部控件 `WS_CLIPSIBLINGS`，右侧顶部摘要采用父面板自绘并自动换行，减少拖动和滚动残影 | ✅ |
 
 ### 阶段 3：统一配置

@@ -77,8 +77,9 @@ struct ReportRow {
 };
 
 struct RoomOption {
-    std::string room_code;
-    std::string room_name;
+    std::string room_code;  // LS_AS_ROOM.ROOM_CODE
+    std::string room_name;  // LS_AS_ROOM.ROOM_NAME
+    std::string dept_code;  // LS_AS_ROOM.Dept_Code；需要院区联动的查询会回填
 };
 
 struct PatientTypeOption {
@@ -270,6 +271,7 @@ struct BarcodeQueryFilters {
     std::string barcode;
     std::string patient_name;
     std::string reg_no;
+    std::string campus;          // 全部/老院/新院，按申请科室是否包含“滨水”派生
     std::string machine_status;  // 全部/已签收未上机/已上机未审核/已审核未发送/发送完成
     std::string room_code;
     std::vector<std::string> machine_statuses;
@@ -677,6 +679,7 @@ struct OutpatientChargeRow {
 using LogFn = std::function<void(const std::string&)>;
 
 bool query_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log = {});
+bool query_barcode_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log = {});
 bool query_report_machine_picker_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log = {});
 bool query_patient_types(const std::string& connection_string, std::vector<PatientTypeOption>& rows, std::string& error, LogFn log = {});
 bool query_machines(const std::string& connection_string, const std::string& room_code, std::vector<MachineOption>& rows, std::string& error, LogFn log = {});

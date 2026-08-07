@@ -855,6 +855,49 @@ bool query_rooms(const std::string& connection_string, std::vector<RoomOption>& 
 #endif
 }
 
+bool query_barcode_rooms(const std::string& connection_string, std::vector<RoomOption>& rows,
+                         std::string& error, LogFn log) {
+    rows.clear();
+#ifndef _WIN32
+    (void)connection_string;
+    (void)log;
+    error = "query_barcode_rooms is only available on Windows";
+    return false;
+#else
+    DbContext db;
+    if (!connect(connection_string, db, error, log)) {
+        return false;
+    }
+
+    const std::string sql =
+        "SELECT CAST(ROOM_CODE AS varchar(20)),isnull(RTRIM(ROOM_NAME),''),"
+        "isnull(LTRIM(RTRIM(CONVERT(varchar(20),Dept_Code))),'')"
+        " FROM LS_AS_ROOM WHERE DELETE_BIT=0"
+        " AND CONVERT(varchar(20),Dept_Code) IN ('102','401')"
+        " ORDER BY Dept_Code,ROOM_CODE";
+    if (log) {
+        log("exec sql: " + sql + "\n");
+    }
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!exec_query(db.dbc, sql, stmt, error)) {
+        return false;
+    }
+
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        RoomOption row;
+        row.room_code = fetch_column(stmt, 1);
+        row.room_name = fetch_column(stmt, 2);
+        row.dept_code = fetch_column(stmt, 3);
+        rows.push_back(std::move(row));
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    error.clear();
+    return true;
+#endif
+}
+
 bool query_report_machine_picker_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log) {
     rows.clear();
 #ifndef _WIN32
@@ -2069,6 +2112,13 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
     DbContext db;
     if (!connect(filters.connection_string, db, error, log)) return false;
 
+    const std::string requested_campus = trim(filters.campus);
+    const auto campus_matches = [&requested_campus](const std::string& dept_name) {
+        if (requested_campus != "老院" && requested_campus != "新院") return true;
+        const std::string campus = contains_text(dept_name, "滨水") ? "新院" : "老院";
+        return campus == requested_campus;
+    };
+
     const std::string date_col =
         trim(filters.date_field) == "Receive" ? "b.IN_DATE" :
         trim(filters.date_field) == "Machine" ? "b.IN_DATE" :
@@ -2197,6 +2247,7 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         row.machine_name   = fetch_column(stmt, 30);
         row.room_code      = fetch_column(stmt, 31);
         row.inspect_date   = fetch_column(stmt, 32);
+        if (!campus_matches(row.dept_name)) continue;
         rows.push_back(row);
     }
 
