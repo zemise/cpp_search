@@ -3786,11 +3786,11 @@ bool build_massive_transfusion_statistics(
     const std::vector<MassiveTransfusionRawRow>& raw_rows,
     MassiveTransfusionStatSummary& summary,
     std::vector<MassiveTransfusionEventRow>& events,
-    std::vector<MassiveTransfusionComponentDetailRow>& orphan_rejected,
+    std::vector<MassiveTransfusionComponentDetailRow>& audit_rows,
     std::string& error) {
     summary = MassiveTransfusionStatSummary{};
     events.clear();
-    orphan_rejected.clear();
+    audit_rows.clear();
 
     const std::string start_date = trim(query.start_date);
     const std::string end_date = trim(query.end_date);
@@ -3943,6 +3943,9 @@ bool build_massive_transfusion_statistics(
     const auto make_component_detail = [&](const Application& app, const Component* component,
                                            const std::string& event_id, bool counted) {
         MassiveTransfusionComponentDetailRow detail;
+        detail.statistic_basis = "application";
+        detail.time_source = "申请时间";
+        detail.selected_time = app.apply_time;
         detail.event_id = event_id;
         detail.campus = campus_for_dept(app.apply_dept);
         detail.patient_no = app.patient_no;
@@ -4016,6 +4019,8 @@ bool build_massive_transfusion_statistics(
             while (next < apps.size() && apps[next]->time_value < window_end) ++next;
 
             MassiveTransfusionEventRow event;
+            event.statistic_basis = "application";
+            event.time_source = "申请时间";
             event.event_id = anchor->patient_no + "@" + anchor->apply_time;
             event.campus = campus_for_dept(anchor->apply_dept);
             event.patient_no = anchor->patient_no;
@@ -4115,10 +4120,10 @@ bool build_massive_transfusion_statistics(
             const std::string campus = campus_for_dept(rejected->apply_dept);
             if (!campus_matches(campus)) continue;
             if (rejected->components.empty()) {
-                orphan_rejected.push_back(make_component_detail(*rejected, nullptr, "", false));
+                audit_rows.push_back(make_component_detail(*rejected, nullptr, "", false));
             } else {
                 for (const auto& component : rejected->components) {
-                    orphan_rejected.push_back(make_component_detail(*rejected, &component, "", false));
+                    audit_rows.push_back(make_component_detail(*rejected, &component, "", false));
                 }
             }
         }
@@ -4144,10 +4149,365 @@ bool build_massive_transfusion_statistics(
         }
         events.push_back(std::move(event));
     }
-    for (const auto& component : orphan_rejected) rejected_forms.insert(component.apply_form_no);
+    for (const auto& component : audit_rows) rejected_forms.insert(component.apply_form_no);
     summary.patient_count = static_cast<int>(qualifying_patients.size());
     summary.rejected_application_count = static_cast<int>(rejected_forms.size());
+    summary.audit_record_count = summary.rejected_application_count;
 
+    std::sort(events.begin(), events.end(), [](const auto& left, const auto& right) {
+        return left.first_apply_time > right.first_apply_time;
+    });
+    error.clear();
+    return true;
+}
+
+bool build_actual_massive_transfusion_statistics(
+    const MassiveTransfusionStatQuery& query,
+    const std::vector<ActualTransfusionRawRow>& raw_rows,
+    MassiveTransfusionStatSummary& summary,
+    std::vector<MassiveTransfusionEventRow>& events,
+    std::vector<MassiveTransfusionComponentDetailRow>& audit_rows,
+    std::string& error) {
+    summary = MassiveTransfusionStatSummary{};
+    events.clear();
+    audit_rows.clear();
+
+    const std::string start_date = trim(query.start_date);
+    const std::string end_date = trim(query.end_date);
+    const std::string time_source = trim(query.event_time_source);
+    if (start_date.size() != 10 || end_date.size() != 10 || start_date > end_date) {
+        error = "valid start_date and end_date are required";
+        return false;
+    }
+    if (!std::isfinite(query.threshold_ml) || query.threshold_ml <= 0.0) {
+        error = "threshold_ml must be a positive finite number";
+        return false;
+    }
+    if (time_source != "match" && time_source != "out" &&
+        time_source != "apply" && time_source != "check") {
+        error = "event_time_source must be match, out, apply, or check";
+        return false;
+    }
+
+    const auto campus_for_dept = [](const std::string& dept) {
+        return contains_text(dept, "滨水") ? std::string("新院") : std::string("老院");
+    };
+    const std::string requested_campus = trim(query.campus);
+    const auto campus_matches = [&requested_campus](const std::string& campus) {
+        return (requested_campus != "老院" && requested_campus != "新院") ||
+               campus == requested_campus;
+    };
+    const auto selected_time = [&time_source](const ActualTransfusionRawRow& row) -> std::string {
+        if (time_source == "out") return trim(row.blood_out_date);
+        if (time_source == "apply") return trim(row.apply_time);
+        if (time_source == "check") return trim(row.check_date);
+        return trim(row.match_date);
+    };
+    const auto source_name = [&time_source]() {
+        if (time_source == "out") return std::string("出库时间");
+        if (time_source == "apply") return std::string("申请时间");
+        if (time_source == "check") return std::string("血库审核时间");
+        return std::string("配血时间");
+    };
+    const auto format_number = [](double value) {
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(2) << value;
+        std::string text = out.str();
+        while (!text.empty() && text.back() == '0') text.pop_back();
+        if (!text.empty() && text.back() == '.') text.pop_back();
+        return text.empty() ? std::string("0") : text;
+    };
+    const auto parse_number = [](const std::string& text, double& value) {
+        const std::string input = trim(text);
+        if (input.empty()) return false;
+        char* end = nullptr;
+        value = std::strtod(input.c_str(), &end);
+        return end && *end == '\0' && value > 0.0;
+    };
+    const auto normalized_unit = [](std::string unit) {
+        unit = trim(unit);
+        for (char& ch : unit) {
+            const unsigned char value = static_cast<unsigned char>(ch);
+            if (value < 128) ch = static_cast<char>(std::toupper(value));
+        }
+        return unit;
+    };
+    const auto datetime_value = [](const std::string& text, std::time_t& value) {
+        std::tm parsed{};
+        if (!parse_sql_datetime(text, parsed)) return false;
+        value = std::mktime(&parsed);
+        return value != static_cast<std::time_t>(-1);
+    };
+    const auto format_datetime = [](std::time_t value) {
+        std::tm* parsed = std::localtime(&value);
+        if (!parsed) return std::string{};
+        char buffer[20]{};
+        std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", parsed);
+        return std::string(buffer);
+    };
+    const auto append_status = [](std::string& status, const std::string& item) {
+        if (item.empty() || status.find(item) != std::string::npos) return;
+        if (!status.empty()) status += "；";
+        status += item;
+    };
+
+    const auto base_detail = [&](const ActualTransfusionRawRow& row) {
+        MassiveTransfusionComponentDetailRow detail;
+        detail.statistic_basis = "actual";
+        detail.time_source = source_name();
+        detail.selected_time = selected_time(row);
+        detail.campus = campus_for_dept(row.apply_dept);
+        detail.patient_no = trim(row.patient_no);
+        detail.patient_name = trim(row.patient_name);
+        detail.apply_form_no = trim(row.apply_form_no);
+        detail.apply_time = trim(row.apply_time);
+        detail.apply_status = trim(row.apply_status);
+        detail.apply_dept = trim(row.apply_dept);
+        detail.bed_no = trim(row.bed_no);
+        detail.apply_doctor = trim(row.apply_doctor);
+        detail.composition = trim(row.composition);
+        detail.apply_num = trim(row.norm);
+        detail.apply_unit = trim(row.unit);
+        detail.cross_match_id = trim(row.cross_match_id);
+        detail.blood_in_id = trim(row.blood_in_id);
+        detail.blood_bag_no = trim(row.blood_bag_no);
+        detail.product_code = trim(row.product_code);
+        detail.verify_state = trim(row.verify_state);
+        detail.match_date = trim(row.match_date);
+        detail.blood_out_date = trim(row.blood_out_date);
+        detail.check_date = trim(row.check_date);
+        detail.blood_out_record_count = row.blood_out_record_count;
+        detail.cross_match_deleted = row.cross_match_deleted;
+        return detail;
+    };
+    const auto in_page = [&](const ActualTransfusionRawRow& row) {
+        const std::string value = selected_time(row);
+        if (value.empty()) return true;  // SQL 已用辅助时间把无所选时间记录限定在查询范围内。
+        const std::string date = date_from_sql_datetime(value);
+        return date >= start_date && date <= end_date;
+    };
+    const auto push_audit = [&](const ActualTransfusionRawRow& row, const std::string& reason) {
+        if (!in_page(row)) return;
+        auto detail = base_detail(row);
+        detail.counted = false;
+        detail.data_status = reason;
+        if (campus_matches(detail.campus)) audit_rows.push_back(std::move(detail));
+    };
+
+    std::map<std::string, std::vector<const ActualTransfusionRawRow*>> reviewed_by_bag;
+    std::vector<const ActualTransfusionRawRow*> candidates;
+    for (const auto& row : raw_rows) {
+        const std::string verify = trim(row.verify_state);
+        if (row.cross_match_deleted) {
+            push_audit(row, "交叉配血记录已删除，不计量");
+            continue;
+        }
+        if (verify == "未审核") {
+            push_audit(row, "未审核，未实际输血，不计量");
+            continue;
+        }
+        if (verify != "已审核") {
+            push_audit(row, verify.empty() ? "实际输血状态为空" : "未识别实际输血状态：" + verify);
+            continue;
+        }
+        if (trim(row.blood_in_id).empty()) {
+            push_audit(row, "已审核但血袋ID为空，不计量");
+            continue;
+        }
+        if (trim(row.patient_no).empty()) {
+            push_audit(row, "已审核但交叉配血病人号为空，不计量");
+            ++summary.missing_patient_no_count;
+            continue;
+        }
+        std::time_t ignored = 0;
+        if (!datetime_value(selected_time(row), ignored)) {
+            push_audit(row, source_name() + "缺失或无效，不建立事件");
+            continue;
+        }
+        reviewed_by_bag[trim(row.blood_in_id)].push_back(&row);
+    }
+    for (const auto& bag : reviewed_by_bag) {
+        if (bag.second.size() == 1) {
+            candidates.push_back(bag.second.front());
+            continue;
+        }
+        for (const auto* row : bag.second) {
+            push_audit(*row, "同一血袋存在多条已审核记录，不重复计量");
+        }
+    }
+
+    const auto row_order = [&](const ActualTransfusionRawRow* left,
+                               const ActualTransfusionRawRow* right) {
+        std::time_t left_time = 0;
+        std::time_t right_time = 0;
+        datetime_value(selected_time(*left), left_time);
+        datetime_value(selected_time(*right), right_time);
+        if (left_time != right_time) return left_time < right_time;
+        if (trim(left->blood_in_id) != trim(right->blood_in_id)) {
+            return trim(left->blood_in_id) < trim(right->blood_in_id);
+        }
+        return trim(left->cross_match_id) < trim(right->cross_match_id);
+    };
+    std::map<std::string, std::vector<const ActualTransfusionRawRow*>> by_patient;
+    for (const auto* row : candidates) by_patient[trim(row->patient_no)].push_back(row);
+    for (auto& pair : by_patient) std::sort(pair.second.begin(), pair.second.end(), row_order);
+
+    std::vector<MassiveTransfusionEventRow> candidate_events;
+    for (auto& patient : by_patient) {
+        auto& bags = patient.second;
+        size_t index = 0;
+        while (index < bags.size()) {
+            const auto* anchor = bags[index];
+            const std::string anchor_time = selected_time(*anchor);
+            const std::string anchor_date = date_from_sql_datetime(anchor_time);
+            if (anchor_date < start_date) {
+                ++index;
+                continue;
+            }
+            if (anchor_date > end_date) break;
+            std::time_t anchor_value = 0;
+            datetime_value(anchor_time, anchor_value);
+            const std::time_t window_end = anchor_value + 24 * 60 * 60;
+            size_t next = index;
+            while (next < bags.size()) {
+                std::time_t value = 0;
+                datetime_value(selected_time(*bags[next]), value);
+                if (value >= window_end) break;
+                ++next;
+            }
+
+            MassiveTransfusionEventRow event;
+            event.statistic_basis = "actual";
+            event.time_source = source_name();
+            event.event_id = patient.first + "@" + anchor_time;
+            event.campus = campus_for_dept(anchor->apply_dept);
+            event.patient_no = patient.first;
+            event.patient_name = trim(anchor->patient_name);
+            event.patient_no_type = trim(anchor->patient_no_type);
+            event.first_apply_time = anchor_time;
+            event.window_end_time = format_datetime(window_end);
+            event.last_apply_time = selected_time(*bags[next - 1]);
+            event.first_apply_form_no = trim(anchor->apply_form_no);
+            event.apply_dept = trim(anchor->apply_dept);
+            event.bed_no = trim(anchor->bed_no);
+
+            std::set<std::string> form_nos;
+            std::set<std::string> departments;
+            std::map<std::string, double> composition_totals;
+            double total_ml = 0.0;
+            for (size_t bag_index = index; bag_index < next; ++bag_index) {
+                const auto& row = *bags[bag_index];
+                auto detail = base_detail(row);
+                detail.event_id = event.event_id;
+                detail.counted = true;
+                if (!detail.apply_form_no.empty()) form_nos.insert(detail.apply_form_no);
+                else ++summary.missing_apply_form_no_count;
+                if (!detail.apply_dept.empty()) departments.insert(detail.apply_dept);
+
+                std::string anomaly;
+                if (trim(row.apply_main_id).empty()) append_status(anomaly, "找不到申请单");
+                if (row.apply_deleted || trim(row.apply_status) == "已删除") append_status(anomaly, "申请单已删除");
+                if (trim(row.apply_status) == "已驳回") append_status(anomaly, "申请单已驳回");
+                if (!trim(row.apply_main_id).empty() &&
+                    trim(row.apply_patient_no) != trim(row.patient_no)) {
+                    append_status(anomaly, "申请单病人号不一致");
+                }
+                if (row.blood_out_record_count > 1) append_status(anomaly, "同一血袋存在多条出库记录，采用最早出库时间");
+                detail.application_anomaly = !anomaly.empty();
+                if (detail.application_anomaly) {
+                    ++event.audit_count;
+                    auto audit = detail;
+                    audit.counted = false;
+                    audit.data_status = anomaly;
+                    if (campus_matches(audit.campus)) audit_rows.push_back(std::move(audit));
+                }
+
+                const bool is_platelet = contains_text(detail.composition, "血小板");
+                const bool is_cryo = contains_text(detail.composition, "冷沉淀");
+                detail.excluded_by_component_filter =
+                    !query.include_platelet_and_cryoprecipitate && (is_platelet || is_cryo);
+                const std::string unit = normalized_unit(detail.apply_unit);
+                double factor = 0.0;
+                if (unit == "ML") factor = 1.0;
+                else if (unit == "U" && is_cryo) factor = 20.0;
+                else if (unit == "U") factor = 200.0;
+                else if (unit == "治疗量") factor = 250.0;
+                double amount = 0.0;
+                const bool valid_amount = parse_number(detail.apply_num, amount);
+                if (factor > 0.0) detail.conversion_factor = format_number(factor);
+                if (factor > 0.0 && valid_amount) detail.converted_ml = format_number(amount * factor);
+
+                if (detail.excluded_by_component_filter) {
+                    detail.counted = false;
+                    detail.data_status = "未勾选，不计量";
+                } else if (detail.composition.empty()) {
+                    detail.counted = false;
+                    detail.data_status = "血袋成分为空，容量无法折算";
+                } else if (factor <= 0.0) {
+                    detail.counted = false;
+                    detail.data_status = "血袋容量单位缺失或未识别";
+                } else if (!valid_amount) {
+                    detail.counted = false;
+                    detail.data_status = "血袋规格为空或无效";
+                } else {
+                    detail.data_status = anomaly.empty() ? "完整" : "已计量；" + anomaly;
+                    ++event.component_count;
+                    const double converted = amount * factor;
+                    total_ml += converted;
+                    composition_totals[detail.composition] += converted;
+                }
+                if (!detail.excluded_by_component_filter && !detail.counted) {
+                    event.complete = false;
+                    ++event.issue_count;
+                    auto audit = detail;
+                    audit.data_status = detail.data_status;
+                    if (campus_matches(audit.campus)) audit_rows.push_back(std::move(audit));
+                }
+                event.components.push_back(std::move(detail));
+            }
+            event.application_count = static_cast<int>(form_nos.size());
+            for (const auto& form : form_nos) {
+                if (!event.apply_form_nos.empty()) event.apply_form_nos += ";";
+                event.apply_form_nos += form;
+            }
+            event.cross_department = departments.size() > 1;
+            event.status_summary = "已审核";
+            if (event.cross_department) append_status(event.status_summary, "跨科室");
+            if (event.audit_count > 0) append_status(event.status_summary, "存在核查项");
+            for (const auto& item : composition_totals) {
+                if (!event.composition_summary.empty()) event.composition_summary += ";";
+                event.composition_summary += item.first + " " + format_number(item.second) + "ml";
+            }
+            event.total_ml = format_number(total_ml);
+            event.qualifies = query.threshold_inclusive
+                ? total_ml >= query.threshold_ml : total_ml > query.threshold_ml;
+            event.data_status = event.complete
+                ? (event.audit_count > 0 ? "完整；存在核查项" : "完整")
+                : "总量不完整";
+            if (event.qualifies || !event.complete) candidate_events.push_back(std::move(event));
+            index = next;
+        }
+    }
+
+    std::set<std::string> qualifying_patients;
+    for (auto& event : candidate_events) {
+        if (!campus_matches(event.campus)) continue;
+        if (event.qualifies) {
+            ++summary.event_count;
+            qualifying_patients.insert(event.patient_no);
+            summary.application_count += event.application_count;
+            summary.component_count += event.component_count;
+            summary.total_ml += std::strtod(event.total_ml.c_str(), nullptr);
+        }
+        if (!event.complete || event.audit_count > 0) {
+            ++summary.issue_event_count;
+            summary.issue_component_count += event.issue_count + event.audit_count;
+        }
+        events.push_back(std::move(event));
+    }
+    summary.patient_count = static_cast<int>(qualifying_patients.size());
+    summary.audit_record_count = static_cast<int>(audit_rows.size());
+    summary.rejected_application_count = summary.audit_record_count;
     std::sort(events.begin(), events.end(), [](const auto& left, const auto& right) {
         return left.first_apply_time > right.first_apply_time;
     });
@@ -4159,13 +4519,13 @@ bool query_massive_transfusion_statistics(
     const MassiveTransfusionStatQuery& query,
     MassiveTransfusionStatSummary& summary,
     std::vector<MassiveTransfusionEventRow>& events,
-    std::vector<MassiveTransfusionComponentDetailRow>& orphan_rejected,
+    std::vector<MassiveTransfusionComponentDetailRow>& audit_rows,
     std::string& error, LogFn log) {
 #ifndef _WIN32
     (void)query;
     (void)summary;
     (void)events;
-    (void)orphan_rejected;
+    (void)audit_rows;
     (void)log;
     error = "query_massive_transfusion_statistics is only available on Windows";
     return false;
@@ -4182,6 +4542,70 @@ bool query_massive_transfusion_statistics(
     }
     DbContext db;
     if (!connect(query.connection_string, db, error, log)) return false;
+
+    if (trim(query.statistic_basis) == "actual") {
+        const std::string time_source = trim(query.event_time_source);
+        const std::string selected_expr =
+            time_source == "out" ? "bo.BloodOut_Date" :
+            time_source == "apply" ? "a.Apply_Time" :
+            time_source == "check" ? "a.Check_Date" : "cm.Match_Date";
+        const std::string auxiliary_expr =
+            "COALESCE(cm.Match_Date,bo.BloodOut_Date,a.Apply_Time,a.Check_Date)";
+        std::ostringstream sql;
+        sql << "SELECT "
+            << "isnull(CONVERT(varchar(32),cm.ID),''),isnull(LTRIM(RTRIM(cm.ApplyFormNO)),''),"
+            << "isnull(LTRIM(RTRIM(cm.Patient_NO)),''),isnull(LTRIM(RTRIM(a.Patient_NOType)),''),"
+            << "isnull(LTRIM(RTRIM(a.Patient_Name)),''),isnull(LTRIM(RTRIM(cm.VerifyState)),''),"
+            << "isnull(CONVERT(varchar(10),cm.Delete_Bit),'0'),isnull(CONVERT(varchar(32),cm.BloodInID),''),"
+            << "isnull(CONVERT(varchar(19),cm.Match_Date,120),''),isnull(CONVERT(varchar(19),bo.BloodOut_Date,120),''),"
+            << "isnull(CONVERT(varchar(10),bo.RecordCount),'0'),isnull(CONVERT(varchar(32),a.ID),''),"
+            << "isnull(LTRIM(RTRIM(a.Patient_NO)),''),isnull(CONVERT(varchar(19),a.Apply_Time,120),''),"
+            << "isnull(CONVERT(varchar(19),a.Check_Date,120),''),isnull(LTRIM(RTRIM(a.ApplyForm_Statue)),''),"
+            << "isnull(CONVERT(varchar(10),a.Delete_Bit),'0'),isnull(LTRIM(RTRIM(a.Apply_Dept)),''),"
+            << "isnull(LTRIM(RTRIM(a.Apply_BedNo)),''),isnull(LTRIM(RTRIM(a.Apply_Doctor)),''),"
+            << "isnull(CONVERT(varchar(32),bi.ID),''),isnull(LTRIM(RTRIM(bi.BloodBagNO)),''),"
+            << "isnull(LTRIM(RTRIM(bi.CmpProductCode)),''),isnull(LTRIM(RTRIM(comp.Blood_Composition)),''),"
+            << "isnull(LTRIM(RTRIM(CONVERT(varchar(32),comp.Norm))),''),isnull(LTRIM(RTRIM(comp.Unit)),'')"
+            << " FROM LS_XK_BloodCrossMatch cm WITH (NOLOCK)"
+            << " LEFT JOIN LS_XK_BloodRequestApply a WITH (NOLOCK)"
+            << " ON a.ApplyFormNO=cm.ApplyFormNO"
+            << " LEFT JOIN LS_XK_BloodInfo bi WITH (NOLOCK) ON bi.ID=cm.BloodInID"
+            << " LEFT JOIN LS_XK_B_CompositionInfo comp WITH (NOLOCK) ON comp.ID=bi.CompositionID"
+            << " LEFT JOIN (SELECT o.BloodInID,MIN(o.BloodOut_Date) BloodOut_Date,"
+            << " COUNT_BIG(*) RecordCount FROM LS_XK_BloodOutInfo o WITH (NOLOCK)"
+            << " GROUP BY o.BloodInID) bo ON bo.BloodInID=cm.BloodInID"
+            << " WHERE ((" << selected_expr << ">='" << sql_escape(start_date) << "' AND "
+            << selected_expr << "<DATEADD(day,2,'" << sql_escape(end_date) << "')) OR ("
+            << selected_expr << " IS NULL AND " << auxiliary_expr << ">='" << sql_escape(start_date)
+            << "' AND " << auxiliary_expr << "<DATEADD(day,1,'" << sql_escape(end_date) << "')))"
+            << " ORDER BY cm.Patient_NO," << selected_expr << ",cm.BloodInID,cm.ID";
+        if (log) log("exec sql: " + sql.str() + "\n");
+        SQLHSTMT stmt = SQL_NULL_HSTMT;
+        if (!exec_query(db.dbc, sql.str(), stmt, error)) return false;
+        std::vector<ActualTransfusionRawRow> raw_rows;
+        while (SQLFetch(stmt) == SQL_SUCCESS) {
+            ActualTransfusionRawRow row;
+            row.cross_match_id = fetch_column(stmt, 1); row.apply_form_no = fetch_column(stmt, 2);
+            row.patient_no = fetch_column(stmt, 3); row.patient_no_type = fetch_column(stmt, 4);
+            row.patient_name = fetch_column(stmt, 5); row.verify_state = fetch_column(stmt, 6);
+            row.cross_match_deleted = trim(fetch_column(stmt, 7)) == "1"; row.blood_in_id = fetch_column(stmt, 8);
+            row.match_date = fetch_column(stmt, 9); row.blood_out_date = fetch_column(stmt, 10);
+            row.blood_out_record_count = std::atoi(fetch_column(stmt, 11).c_str()); row.apply_main_id = fetch_column(stmt, 12);
+            row.apply_patient_no = fetch_column(stmt, 13); row.apply_time = fetch_column(stmt, 14);
+            row.check_date = fetch_column(stmt, 15); row.apply_status = fetch_column(stmt, 16);
+            row.apply_deleted = trim(fetch_column(stmt, 17)) == "1"; row.apply_dept = fetch_column(stmt, 18);
+            row.bed_no = fetch_column(stmt, 19); row.apply_doctor = fetch_column(stmt, 20);
+            row.blood_info_id = fetch_column(stmt, 21); row.blood_bag_no = fetch_column(stmt, 22);
+            row.product_code = fetch_column(stmt, 23); row.composition = fetch_column(stmt, 24);
+            row.norm = fetch_column(stmt, 25); row.unit = fetch_column(stmt, 26);
+            raw_rows.push_back(std::move(row));
+        }
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        const bool built = build_actual_massive_transfusion_statistics(
+            query, raw_rows, summary, events, audit_rows, error);
+        if (built) summary.raw_record_count = static_cast<int>(raw_rows.size());
+        return built;
+    }
 
     std::ostringstream sql;
     sql << "SELECT "
@@ -4241,8 +4665,10 @@ bool query_massive_transfusion_statistics(
         raw_rows.push_back(std::move(row));
     }
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
-    return build_massive_transfusion_statistics(query, raw_rows, summary, events,
-                                                orphan_rejected, error);
+    const bool built = build_massive_transfusion_statistics(
+        query, raw_rows, summary, events, audit_rows, error);
+    if (built) summary.raw_record_count = static_cast<int>(raw_rows.size());
+    return built;
 #endif
 }
 

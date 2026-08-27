@@ -554,9 +554,9 @@ ListView 单元格复制菜单统一使用公共预览规则：右键显示可�
 
 ## 大量输血统计
 
-`统计分析管理 -> 大量输血统计` 使用 `LS_XK_BloodRequestApply` 申请主表和 `LS_XK_BloodRequestApplySon` 申请成分子表，只读统计申请量，不统计审核量、配血量、出库量或实际输注量。
+`统计分析管理 -> 大量输血统计` 提供“实际输血量”和“申请量对照”两种只读口径，正式默认“实际输血量”和“配血时间”。实际输血量以 `LS_XK_BloodCrossMatch.VerifyState='已审核'` 作为事实，并按唯一 `BloodInID` 计量；用户可主动切换申请量对照。
 
-查询从页面开始日期 `00:00:00` 起读取，不向前回溯；结束条件读取到页面结束日期次日 `00:00:00 + 24小时`，用于补齐最后一天起始事件的完整窗口。只有事件第一张有效申请时间位于页面日期范围内的事件可进入结果，结束日期以后读取的申请只能补充已有事件，不能新建结果事件。
+申请量对照分支从页面开始日期 `00:00:00` 起读取，不向前回溯；结束条件读取到页面结束日期次日 `00:00:00 + 24小时`，用于补齐最后一天起始事件的完整窗口。只有事件第一张有效申请时间位于页面日期范围内的事件可进入结果，结束日期以后读取的申请只能补充已有事件，不能新建结果事件。
 
 主查询保留未审核、已审核、已完结和已驳回申请，排除 `Delete_Bit=1` 或状态为已删除的记录。C++ 按去空格后的 `Patient_NO` 分组，以页面范围内第一张有效申请为事件起点 `T0`，窗口使用左闭右开区间：
 
@@ -580,3 +580,23 @@ T0 <= Apply_Time < T0 + 24小时
 查询参数携带阈值毫升数和比较方式，默认条件为 `>=1600ml`；阈值必须大于 `0` 且页面限制最多两位小数，比较方式可选 `>=` 或 `>`。已知折算量满足本次条件时事件命中大量输血；即使另有异常成分，只要已知量已经满足条件，事件仍命中并标记总量不完整。已知量未满足条件且存在无法折算或子表缺失时，事件进入折算异常结果，不能直接判定未命中。查询状态及两级 CSV 均记录实际统计条件。
 
 院区不下推 SQL，按事件首张有效申请的 `Apply_Dept` 在 C++ 内存派生：包含“滨水”为新院，其他为老院。事件列表、成分列表、汇总和 CSV 均基于院区过滤后的内存结果。事件和逐成分 CSV 不重新查询 LIS，双击事件或成分通过 `WM_BLOOD_OPEN_REQUEST` 定位对应输血申请。
+
+实际输血量查询链路为：
+
+```text
+LS_XK_BloodCrossMatch cm
+    LEFT JOIN LS_XK_BloodRequestApply a ON a.ApplyFormNO=cm.ApplyFormNO
+    LEFT JOIN LS_XK_BloodInfo bi ON bi.ID=cm.BloodInID
+    LEFT JOIN LS_XK_B_CompositionInfo comp ON comp.ID=bi.CompositionID
+    LEFT JOIN (
+        SELECT BloodInID, MIN(BloodOut_Date), COUNT_BIG(*)
+        FROM LS_XK_BloodOutInfo
+        GROUP BY BloodInID
+    ) bo ON bo.BloodInID=cm.BloodInID
+```
+
+出库表只做一次按 `BloodInID` 的预聚合，避免对每条交叉配血记录执行相关子查询；申请表采用 `a.ApplyFormNO=cm.ApplyFormNO` 直接等值连接，避免在连接列两侧执行 `LTRIM/RTRIM` 而妨碍索引使用。现场只读核查已确认申请单号直接关联无缺失，去空格只用于返回后的显示和 C++ 分组。
+
+实际口径可选 `Match_Date / BloodOut_Date / Apply_Time / Check_Date` 作为事件时间，默认 `Match_Date`。同一患者按所选时间升序，以第一袋为起点建立左闭右开的24小时窗口；所选时间为空时不回退，进入时间缺失核查。`BloodOutInfo` 多行时只取最早出库时间并标记核查，不能放大血袋数。事件的“实际输血制品构成”只按 `CompositionInfo.Blood_Composition + Norm + Unit` 折算后的实际血袋毫升数汇总，不读取申请子表成分；申请量对照分支才按申请成分生成“申请制品构成”。查询状态同时显示 SQL 返回原始记录数和总耗时。
+
+`VerifyState='未审核'`、未知状态、逻辑删除的交叉配血记录不进入正式统计而进入核查；申请单已删除、已驳回、缺失或病人号不一致不覆盖已审核的实际输血事实，血袋仍计量并标记申请单异常。实际容量读取 `BloodInfo.CompositionID -> CompositionInfo.Norm + Unit`，折算仍使用 `ML×1 / 普通U×200 / 冷沉淀U×20 / 治疗量×250`。事件、血袋明细和 CSV 均记录统计口径、事件时间口径、阈值、开关和异常状态。

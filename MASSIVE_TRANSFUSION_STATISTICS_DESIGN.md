@@ -1,6 +1,6 @@
 # 大量输血统计设计文档
 
-本文档记录 `统计分析管理 -> 大量输血统计` 模块的当前实现和冻结口径。第一版代码已经完成，后续现场值域核查、真实 LIS 对账和需求变更应继续同步本文档。
+本文档记录 `统计分析管理 -> 大量输血统计` 模块的实际输血量正式口径和保留的申请量对照口径。两套口径均已实现，页面现已正式默认“实际输血量”。
 
 ## 当前状态
 
@@ -8,17 +8,18 @@
 - 页面入口：`统计分析管理 -> 大量输血统计(&5)`，已替换原 `统计分析5(&5)` 占位页面。
 - 核心代码：
   - `src/massive_transfusion_statistics_module.h/.cpp`
-  - `src/search_core.h/.cpp` 中的 `query_massive_transfusion_statistics` 和 `build_massive_transfusion_statistics`
+  - `src/search_core.h/.cpp` 中的 `query_massive_transfusion_statistics`、`build_massive_transfusion_statistics` 和 `build_actual_massive_transfusion_statistics`
   - `tests/massive_transfusion_statistics_test.cpp`
-- 当前实现：后台只读查询、事件汇总、事件列表、事件内申请成分列表、独立已驳回核查视图、事件/成分两级 CSV、表头排序及输血申请跳转均已接入。
-- 构建状态：MinGW Windows 全量构建已通过；纯聚合测试样本已通过，真实 LIS 结果仍需现场对账。
+- 当前实现：页面可选择“申请量对照/实际输血量”。实际输血口径以已审核交叉配血记录为事实、按唯一血袋计量，支持四种事件时间、异常核查、事件/血袋两级 CSV；申请量逻辑原样保留用于对照。
+- 构建状态：MinGW Windows 全量构建已通过；纯聚合测试样本已通过，实际输血量已切换为正式默认口径。
 - 页面性质：只读统计页，不写入 LIS 业务表。
-- 统计目标：按同一病人号识别 24 小时内累计申请血液制品折算量满足用户所选阈值条件的患者申请事件；默认条件为 `>= 1600 ml`。
+- 统计目标：按同一病人号识别 24 小时内累计申请量或实际输血量满足用户所选阈值条件的事件；默认条件为 `>= 1600 ml`。
 - 患者识别：第一版只按去空格后的 `Patient_NO` 判断同一患者，不跨病人号合并，不使用姓名、身份证或住院次数辅助合并。
 - 数据来源：
   - 申请主表 `LS_XK_BloodRequestApply`。
   - 申请成分子表 `LS_XK_BloodRequestApplySon`。
-  - 血液成分字典 `LS_XK_B_CompositionInfo` 仅用于数据核查，第一版换算不依赖该表。
+  - 实际输血事实表 `LS_XK_BloodCrossMatch`。
+  - 血袋表 `LS_XK_BloodInfo`、出库表 `LS_XK_BloodOutInfo` 和血液成分字典 `LS_XK_B_CompositionInfo`。
 - 可复用模块：
   - `src/backup_blood_statistics_module.h/.cpp` 的页面、后台查询、排序、导出和跨模块跳转结构。
   - `src/blood_module.h/.cpp` 的输血申请详情跳转接口。
@@ -26,7 +27,297 @@
 - 单位值域和换算规则已确认：当前实际单位只有 `ML / U / 治疗量`；普通制品按 `1 ML = 1 ml`、`1 U = 200 ml`、`1 治疗量 = 250 ml` 折算，名称包含“冷沉淀”的制品按 `1 U = 20 ml` 折算。
 - 24 小时事件划分、日期归属、申请状态范围、可调阈值、院区筛选和页面明细能力均已确认。
 
-## 已确认业务口径
+## 实际输血量口径（已实现并正式默认）
+
+### 改造结论
+
+原“大量输血统计”建立在输血申请单上，只能统计患者在24小时内申请了多少血液制品，不能证明血液已实际输给患者。本次正式口径已改为以交叉配血审核事实和实际血袋为依据。
+
+2026-08-27 已补充确认：
+
+- `LS_XK_BloodCrossMatch.VerifyState='已审核'` 表示该记录对应的血液已经实际输给患者。
+- `LS_XK_BloodCrossMatch.VerifyState='未审核'` 表示没有实际输血，不贡献实际输血量。
+- `LS_XK_BloodCrossMatch.ApplyFormNO` 对应输血申请单号；同一申请单可以有多行，因为可能实际使用多袋或多种成分血。
+- `LS_XK_BloodCrossMatch.BloodInID` 标识实际使用的血袋，并关联 `LS_XK_BloodInfo.ID`。
+
+因此，实际输血量口径把 `LS_XK_BloodCrossMatch` 作为核心事实表，把申请主表降为患者、科室及申请单核对来源。原申请量算法不删除，作为用户可选的“申请量对照”长期保留。
+
+### 已确认的实际输血量业务口径
+
+| 项目 | 已确认口径 |
+| --- | --- |
+| 时间字段 | 用户自行选择；默认 `LS_XK_BloodCrossMatch.Match_Date`（配血时间） |
+| 其他时间选项 | `LS_XK_BloodOutInfo.BloodOut_Date`（出库时间）、`LS_XK_BloodRequestApply.Apply_Time`（申请时间）、`LS_XK_BloodRequestApply.Check_Date`（血库审核时间） |
+| 页面日期归属 | 与所选时间字段一致，按事件第一袋血的所选时间归属 |
+| 实际输血状态 | `VerifyState='已审核'` 参与统计；`未审核`不计量；其他或空状态进入异常核查 |
+| 血袋唯一键 | `BloodInID` 唯一代表一袋血，一袋只能实际输给一个患者一次，不拆分、不分次输注 |
+| 未审核占用 | 未审核记录中出现的 `BloodInID` 不视为已使用，之后仍可由另一输血单审核并实际使用 |
+| 容量来源 | `BloodInfo.CompositionID -> CompositionInfo.Norm + CompositionInfo.Unit` |
+| 交叉配血删除 | `CrossMatch.Delete_Bit=1` 不进入正式统计，但进入删除异常核查 |
+| 退血等特殊状态 | 当前无其他字段，暂不处理退血、报废、撤销、冲销等情况 |
+| 申请单异常 | 申请单已删除、已驳回、缺失或病人号不一致时，实际输血事实仍计入并标记异常 |
+| 患者分组 | 使用 `LS_XK_BloodCrossMatch.Patient_NO`；申请表病人号仅核对 |
+| 院区/科室/床号 | 取事件第一袋实际输血关联申请单的数据 |
+| 多科室事件 | 明细保留每袋对应申请科室，事件标记“跨科室” |
+| 血小板和冷沉淀 | 默认不计量，勾选后计量；冷沉淀 `1U=20ml` |
+| 阈值 | 默认 `>=1600ml`，允许修改阈值并选择 `>=` 或 `>`，最多两位小数 |
+| 申请量口径 | 保留作为对照；实际输血量完成现场对账后设为默认 |
+| 容量异常 | 已知量满足阈值时仍命中并标记不完整；否则进入异常结果 |
+
+### 当前申请量统计运行流程
+
+```mermaid
+flowchart TD
+    A["页面条件<br/>首次申请日期、院区、阈值、比较方式"] --> B["LS_XK_BloodRequestApply<br/>输血申请主表"]
+    B -->|"ApplyFormNO"| C["LS_XK_BloodRequestApplySon<br/>申请成分子表"]
+
+    B --> D["排除 Delete_Bit=1 和已删除申请"]
+    D --> E["按 ApplyFormNO 合并申请单"]
+    C --> E
+
+    E --> F["按 Patient_NO 分组"]
+    F --> G["以第一张有效申请的 Apply_Time<br/>建立24小时事件"]
+    G --> H["汇总24小时内所有申请单"]
+
+    H --> I["读取 ApplyComposition / ApplyNum / ApplyUnit"]
+    I --> J["按申请单位折算<br/>ML×1<br/>普通U×200<br/>冷沉淀U×20<br/>治疗量×250"]
+
+    J --> K["按‘包括血小板和冷沉淀’开关决定是否计量"]
+    K --> L["与用户阈值比较<br/>默认 >=1600ml"]
+    L --> M["生成大量输血事件、明细和CSV"]
+
+    N["已驳回申请"] -->|"只展示，不计量"| M
+```
+
+当前代码的主要查询链路为：
+
+```text
+LS_XK_BloodRequestApply
+    LEFT JOIN LS_XK_BloodRequestApplySon
+        ON ApplyFormNO
+```
+
+当前流程没有读取 `LS_XK_BloodCrossMatch.VerifyState`，也没有通过 `BloodInID` 读取实际血袋。因此当前页面结果的准确业务名称应理解为“24小时大量用血申请统计”。
+
+### 目标实际输血量统计链路
+
+```mermaid
+flowchart TD
+    A["LS_XK_BloodCrossMatch<br/>实际输血事实入口"] --> B{"VerifyState"}
+    B -->|"已审核"| C["纳入实际输血统计"]
+    B -->|"未审核或其他状态"| D["不计量<br/>可在核查明细中展示"]
+
+    C --> E["按 BloodInID 识别实际使用血袋"]
+    E -->|"BloodInID = ID"| F["LS_XK_BloodInfo<br/>血袋信息"]
+
+    F -->|"CompositionID = ID"| G["LS_XK_B_CompositionInfo<br/>成分名称、Norm、Unit"]
+    E -->|"BloodInID"| H["LS_XK_BloodOutInfo<br/>出库时间、出库人"]
+
+    C -->|"ApplyFormNO"| I["LS_XK_BloodRequestApply<br/>申请单及患者、科室信息"]
+    I -->|"ApplyFormNO"| J["LS_XK_BloodRequestApplySon<br/>仅用于申请量对照"]
+
+    C --> K["按病人号归集实际血袋"]
+    H --> K
+    G --> K
+
+    K --> L["以第一袋的所选时间建立24小时事件<br/>默认 Match_Date"]
+    L --> M["按唯一 BloodInID 去重"]
+    M --> N["折算每袋实际血量"]
+    N --> O["累计24小时实际输血量"]
+    O --> P["按用户阈值判断<br/>默认 >=1600ml"]
+    P --> Q["实际大量输血事件"]
+```
+
+推荐主链路：
+
+```text
+LS_XK_BloodCrossMatch cm
+    LEFT JOIN LS_XK_BloodRequestApply a
+        ON a.ApplyFormNO = cm.ApplyFormNO
+    LEFT JOIN LS_XK_BloodInfo bi
+        ON bi.ID = cm.BloodInID
+    LEFT JOIN LS_XK_B_CompositionInfo comp
+        ON comp.ID = bi.CompositionID
+    LEFT JOIN（按 BloodInID 一次性预聚合）LS_XK_BloodOutInfo bo
+        ON bo.BloodInID = cm.BloodInID
+```
+
+`LS_XK_BloodOutInfo` 如果同一个 `BloodInID` 存在多行，不能直接连接后累计，否则会放大血袋数量。正式查询按 `BloodInID` 一次性预聚合出 `MIN(BloodOut_Date) + COUNT_BIG(*)`，再与实际输血事实连接；不再为每一条交叉配血记录执行相关聚合。申请表使用 `a.ApplyFormNO=cm.ApplyFormNO` 直接等值连接，现场只读核查已确认直接关联无缺失，从而避免连接列函数影响索引使用。
+
+### 各表职责
+
+| 表 | 实际输血量方案中的职责 |
+| --- | --- |
+| `LS_XK_BloodCrossMatch` | 核心事实表；通过 `VerifyState` 判断是否实际输血，通过 `BloodInID` 指向实际血袋 |
+| `LS_XK_BloodInfo` | 提供血袋编号、产品码和 `CompositionID`；通过成分 ID 取得实际血袋规格 |
+| `LS_XK_B_CompositionInfo` | 提供 `Blood_Composition / Norm / Unit`，作为已确认的实际血袋容量和单位来源 |
+| `LS_XK_BloodOutInfo` | 提供 `BloodOut_Date / BloodOut_Man`；选择“出库时间”口径时使用 `BloodOut_Date` |
+| `LS_XK_BloodRequestApply` | 提供申请单、患者、科室、床号、医生等业务信息，并与交叉配血患者信息交叉核对 |
+| `LS_XK_BloodRequestApplySon` | 不再参与实际输血量合计，仅用于申请量、实际量和差值对照 |
+
+实际输血事件的“制品构成”只由 `CompositionInfo.Blood_Composition` 及该血袋的 `Norm + Unit` 折算量汇总，不读取申请子表成分。页面和事件 CSV 在实际口径下显示“实际输血制品构成”，切换到申请量对照时显示“申请制品构成”，避免两种口径在展示层混淆。
+
+### 实际输血事实筛选
+
+查询需要同时读取正式记录和异常核查记录，不能在 SQL 层直接丢弃所有删除或未知状态行。正式计量记录至少满足：
+
+```text
+ISNULL(cm.Delete_Bit, 0) = 0
+AND LTRIM(RTRIM(ISNULL(cm.VerifyState, ''))) = '已审核'
+AND cm.BloodInID IS NOT NULL
+```
+
+处理建议：
+
+- `VerifyState='已审核'`：参与实际输血事件和实际量合计。
+- `VerifyState='未审核'`：不建立事件、不贡献实际量，可保留在“未审核核查”视图。
+- `VerifyState` 为空或未知值：不静默计量，进入状态异常视图。
+- `BloodInID` 为空：无法确定实际血袋，不计量并标记异常。
+- `cm.Delete_Bit=1`：不进入正式统计；无论审核状态如何，保留在删除异常核查视图。
+
+申请单状态不再决定实际输血事实。若交叉配血已审核，但申请单已删除、已驳回或缺失，推荐仍保留该实际输血记录，并标记“申请单异常”，不能让申请单状态覆盖已经发生的实际输血事实。
+
+### 去重和冲突规则
+
+实际统计的最小计量单元是一袋血，推荐主去重键为：
+
+```text
+BloodInID
+```
+
+同一个 `BloodInID` 只能贡献一次实际输血量。未审核记录不会消耗该血袋；只有最终出现的已审核有效记录才使该血袋参与实际量统计。聚合前仍进行防御性检查：
+
+- 同一 `BloodInID` 是否存在多条已审核交叉配血记录。
+- 同一 `BloodInID` 是否出现在多个 `ApplyFormNO`。
+- 同一 `BloodInID` 是否关联多个 `Patient_NO`。
+- 同一交叉配血记录是否因 `BloodOutInfo` 多行连接而被重复展开。
+- `BloodInID` 是否找不到对应 `BloodInfo`。
+
+按已确认业务规则，多条已审核记录不应出现相同 `BloodInID`。如果现场异常数据仍出现此情况，不重复计量，并列入“同一血袋多条已审核记录”异常核查。申请单或患者冲突同样不静默选择任意一行。
+
+### 患者识别
+
+实际输血量口径推荐以：
+
+```text
+LTRIM(RTRIM(LS_XK_BloodCrossMatch.Patient_NO))
+```
+
+作为患者分组键。`LS_XK_BloodRequestApply.Patient_NO` 用于核对，不用于覆盖交叉配血患者号：
+
+```text
+CrossMatch.Patient_NO == BloodRequestApply.Patient_NO
+```
+
+两者不一致时标记“交叉配血与申请单病人号不一致”。交叉配血病人号为空时不能仅凭姓名自动合并，应进入异常结果。
+
+### 24小时时间字段与日期归属
+
+页面提供“事件时间”下拉框，用户自行选择建立24小时事件和页面日期归属所使用的字段：
+
+| 页面名称 | 数据库字段 | 默认 |
+| --- | --- | --- |
+| 配血时间 | `LS_XK_BloodCrossMatch.Match_Date` | 是 |
+| 出库时间 | `LS_XK_BloodOutInfo.BloodOut_Date` | 否 |
+| 申请时间 | `LS_XK_BloodRequestApply.Apply_Time` | 否 |
+| 血库审核时间 | `LS_XK_BloodRequestApply.Check_Date` | 否 |
+
+一次查询只能使用一种时间口径。事件 ID、排序、日期范围、24小时窗口、状态提示和 CSV 都必须记录本次选择，不能在同一次查询中混合多种时间来源。
+
+推荐算法：
+
+```text
+按 Patient_NO 分组
+    -> 实际输血血袋按 selected_time 升序
+    -> 第一袋血的 selected_time 为 T0
+    -> T0 <= selected_time < T0 + 24小时 的血袋进入同一事件
+    -> 当前窗口结束后的下一袋血建立新事件
+```
+
+页面日期按事件第一袋血的 `selected_time` 归属；查询结束日期仍向后补齐 24 小时，以完整加载结束日期当天建立的事件。
+
+### 实际血量来源与折算
+
+实际容量和单位已确认使用：
+
+```text
+LS_XK_BloodCrossMatch.BloodInID
+    -> LS_XK_BloodInfo.ID
+    -> LS_XK_BloodInfo.CompositionID
+    -> LS_XK_B_CompositionInfo.ID
+    -> Norm + Unit
+```
+
+`Norm` 作为每袋数量，`Unit` 作为原单位，`Blood_Composition` 用于识别血小板、冷沉淀及制品构成。缺少成分、`Norm`、`Unit` 或无法折算时，不按 `0` 静默处理，事件标记为“实际量不完整”。
+
+折算规则暂沿用现有版本：
+
+| 实际血袋成分与单位 | 折算 |
+| --- | ---: |
+| `ML` | 数量 `× 1 ml` |
+| 名称包含“冷沉淀”的 `U` | 数量 `× 20 ml` |
+| 其他制品的 `U` | 数量 `× 200 ml` |
+| `治疗量` | 数量 `× 250 ml` |
+
+“血小板和冷沉淀”开关继续保留，但名称来源改为实际血袋关联的 `LS_XK_B_CompositionInfo.Blood_Composition`。未勾选时相关血袋保留明细但不贡献事件实际总量。
+
+### 页面与导出实现
+
+页面已增加“统计口径”：
+
+```text
+申请量对照
+实际输血量
+```
+
+页面已正式默认“实际输血量”，默认事件时间为“配血时间”；用户仍可主动切换“申请量对照”。当前事件列表已展示：
+
+- 第一袋实际输血时间、窗口结束时间和最后实际输血时间。
+- 实际血袋数、实际输血量。
+- 关联申请单数。
+- 计量血袋数和核查记录数。
+- 数据完整性及冲突状态。
+
+实际血袋明细每袋一行，当前已展示并导出：
+
+- 事件 ID、病人号、姓名、院区、科室和床号。
+- 申请单号、交叉配血记录 ID、`BloodInID`。
+- `VerifyState`、实际时间、配血时间、出库时间。
+- 血袋编号、产品码和血液成分。
+- 原始容量、单位、折算因子、实际折算量、是否计量。
+- 原申请科室、床号、医生和异常说明。
+
+申请量、实际量与差值的同事件并列展示，以及血型、Rh、血液来源字段，保留为现场对账后的增强项，不影响本次实际量统计。
+
+事件 CSV 和实际血袋 CSV 必须记录：
+
+- 统计口径。
+- 所选事件时间字段及页面名称。
+- 阈值与比较方式。
+- 是否包括血小板和冷沉淀。
+- 容量来源和折算规则版本。
+- 去重键及数据完整性状态。
+
+### 实施与验收步骤
+
+1. 现场核查交叉配血、血袋、出库和成分表字段及值域，重点核对四个时间字段、`Norm` 和 `Unit` 的空值情况。
+2. 已完成：新增独立的实际输血原始行结构、只读查询和纯聚合函数，未改写现有申请量聚合。
+3. 已完成：按 `BloodInID` 去重，并覆盖已审核状态、重复血袋、申请单异常、时间缺失和容量折算测试。
+4. 已确认：实际输血量正式设为默认统计口径，配血时间为默认事件时间。
+5. 持续抽查：四种事件时间、跨科室事件、删除记录核查和申请单异常场景。
+6. 申请量长期保留为对照，不再作为页面默认口径。
+
+### 已确认的开发细节
+
+2026-08-27 已确认以下实现规则，实际输血量方案不再有业务口径阻塞项：
+
+1. 用户选择的时间字段为空时不回退其他时间，记录进入“时间缺失异常”，不参与24小时事件，避免同一次查询混用时间口径。
+2. 删除、未审核、未知状态等异常核查视图严格使用本次所选时间字段和页面日期范围，与正式统计保持一致。
+3. 如果同一个 `BloodInID` 意外关联多条 `LS_XK_BloodOutInfo`，选择“出库时间”时取最早的 `BloodOut_Date`，同时标记“多出库记录”；连接和聚合不得因此重复累计血袋。
+
+实现说明：所选时间为空的记录没有可直接比较的日期。只读 SQL 使用四个候选时间的 `COALESCE` 仅作为异常记录的查询范围护栏；C++ 聚合仍严格判定所选时间为空、绝不把辅助时间回退为事件时间。四个候选时间全部为空的历史记录无法归属任何页面日期，因此不会被日期查询读取。
+
+## 已确认的当前申请量业务口径
 
 截至 2026-08-27，以下口径已确认并已实现：
 
@@ -62,7 +353,7 @@
 
 例如默认条件为 `>=1600ml` 时，`4 U + 2 治疗量 + 300 ML = 4×200 + 2×250 + 300 = 1600 ml`，应进入大量输血统计；切换为 `>1600ml` 后则不命中。
 
-## 功能目标
+## 当前申请量功能目标
 
 模块用于发现短时间内申请大量血液制品的患者，支持以下工作：
 
@@ -75,9 +366,9 @@
 - 对无法折算、病人号为空、申请单号为空或申请成分缺失等数据单列异常，不静默忽略。
 - 支持将当前明细导出为 CSV，并可跳转到输血结果查询核查原始申请单。
 
-本模块统计的是“申请量”，不是审核量、配血量、出库量或实际输注量。若后续要统计实际用血，应另行设计基于交叉配血和出库记录的统计模块，不能直接改变本模块口径。
+本节以下内容专门描述保留的“申请量对照”分支；页面正式默认口径已经是本文前部定义的“实际输血量”。
 
-## 已确认的数据依据
+## 当前申请量实现的数据依据
 
 ### LS_XK_BloodRequestApply
 
@@ -132,7 +423,7 @@
 
 现有输血历史页面将 `Norm + Unit` 作为血袋规格展示。本模块已经取得明确的申请单位换算规则，因此第一版不读取 `Norm`，也不依赖 `LS_XK_B_CompositionInfo` 完成换算。
 
-## 推荐统计口径
+## 当前申请量统计口径
 
 ### 患者键
 
@@ -240,7 +531,7 @@ T0 <= Apply_Time < DATEADD(hour, 24, T0)
 
 第一版不提供改变统计状态口径的筛选项，保证所有用户使用相同统计口径。事件内申请单明细和 CSV 必须包含原始状态，并为已驳回申请显示“不计量”。
 
-## 单位折算设计
+## 当前申请量单位折算设计
 
 ### 原则
 
@@ -381,7 +672,7 @@ WHERE ISNULL(a.Delete_Bit,0)=0
 - 主表成分字段是否只是子表冗余，是否存在子表缺失但主表有效的历史数据。
 - 负数、零值、空数量是否有特殊业务含义。
 
-## 查询设计
+## 当前申请量查询设计
 
 ### 查询对象
 
@@ -476,7 +767,7 @@ Patient_NO
 - 无子表明细的有效申请仍保留在事件申请单明细中，标记“申请成分子表缺失”。
 - 主表和子表都无有效成分时同样标记“申请成分缺失”。
 
-## C++ 聚合算法
+## 当前申请量 C++ 聚合算法
 
 建议把时间窗口和折算计算实现为独立于 ODBC/UI 的纯函数，便于单元测试。
 
@@ -519,7 +810,7 @@ std::vector<MassiveTransfusionEvent> build_massive_transfusion_events(...);
 BloodVolumeConversionResult convert_blood_volume(...);
 ```
 
-## 页面设计
+## 当前申请量页面设计
 
 ### 筛选区
 
@@ -618,7 +909,7 @@ BloodVolumeConversionResult convert_blood_volume(...);
 
 可复用 `blood_module.h` 中的 `WM_BLOOD_OPEN_REQUEST` 和 `BloodRequestOpenTarget`。如果用户要核查事件内其他申请单，可在事件详情列表中双击对应申请单分别跳转。
 
-## CSV 导出
+## 当前申请量 CSV 导出
 
 导出格式：UTF-8 BOM CSV。
 
@@ -657,7 +948,7 @@ BloodVolumeConversionResult convert_blood_volume(...);
 - 填充大量 ListView 行时使用 `WM_SETREDRAW` 暂停重绘，完成后统一刷新。
 - 日志可以记录查询范围、返回行数、聚合事件数和耗时，但不得记录患者姓名等非必要敏感信息。
 
-## 代码改动范围
+## 当前申请量代码改动范围
 
 已新增：
 
@@ -690,7 +981,7 @@ BloodVolumeConversionResult convert_blood_volume(...);
 
 当前版本使用固定换算逻辑和一个查询开关，不需要扩展本机 SQLite 或设置页面。后续单位值域或制品规则发生变化时，再评估按现有 `quality_control_store` 模式增加本机规则配置。
 
-## 分阶段实施建议
+## 当前申请量分阶段实施记录
 
 ### 阶段 0：现场值域核查（待现场完成）
 
@@ -725,7 +1016,7 @@ BloodVolumeConversionResult convert_blood_volume(...);
 - 测量典型日、月范围的查询耗时。
 - 根据对账结果调整折算别名和规则，不随意改变时间算法。
 
-## 测试与验收用例
+## 当前申请量测试与验收用例
 
 ### 时间窗口
 
@@ -804,7 +1095,7 @@ BloodVolumeConversionResult convert_blood_volume(...);
 | 双击正式事件 | 跳转并定位第一张输血申请单 |
 | 查询失败 | 显示错误并保留上一轮成功结果 |
 
-## 已确认开发决策
+## 已确认的当前申请量开发决策
 
 以下事项均已确认，不再列为开发前阻塞项：
 
@@ -818,7 +1109,7 @@ BloodVolumeConversionResult convert_blood_volume(...);
 8. 提供院区筛选，按申请科室名称派生新老院区。
 9. 必须查看和导出事件内每张申请单、每项制品及折算明细。
 
-## 推荐的第一版冻结口径
+## 当前申请量第一版冻结口径
 
 第一版冻结口径：
 
@@ -839,7 +1130,7 @@ BloodVolumeConversionResult convert_blood_volume(...);
 - 提供全部、老院、新院筛选，按申请科室名称包含“滨水”派生新院，其他为老院。
 - 模块只读 LIS，支持事件级和成分级 CSV、事件内申请成分查看、排序及申请单跳转。
 
-## 完成标准
+## 当前申请量完成标准
 
 满足以下条件后方可认为模块完成：
 

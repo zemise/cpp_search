@@ -565,9 +565,40 @@ struct MassiveTransfusionStatQuery {
     std::string start_date;
     std::string end_date;
     std::string campus;  // 全部/老院/新院，按事件首张有效申请的申请科室派生
+    std::string statistic_basis = "actual";       // actual/application；正式默认实际输血量
+    std::string event_time_source = "match";      // match/out/apply/check；仅实际输血口径使用
     bool include_platelet_and_cryoprecipitate = false;
     double threshold_ml = 1600.0;
     bool threshold_inclusive = true;  // true: >= threshold_ml, false: > threshold_ml
+};
+
+struct ActualTransfusionRawRow {
+    std::string cross_match_id;
+    std::string apply_form_no;
+    std::string patient_no;
+    std::string patient_no_type;
+    std::string patient_name;
+    std::string verify_state;
+    bool cross_match_deleted = false;
+    std::string blood_in_id;
+    std::string match_date;
+    std::string blood_out_date;
+    int blood_out_record_count = 0;
+    std::string apply_main_id;
+    std::string apply_patient_no;
+    std::string apply_time;
+    std::string check_date;
+    std::string apply_status;
+    bool apply_deleted = false;
+    std::string apply_dept;
+    std::string bed_no;
+    std::string apply_doctor;
+    std::string blood_info_id;
+    std::string blood_bag_no;
+    std::string product_code;
+    std::string composition;
+    std::string norm;
+    std::string unit;
 };
 
 struct MassiveTransfusionRawRow {
@@ -593,6 +624,9 @@ struct MassiveTransfusionRawRow {
 };
 
 struct MassiveTransfusionComponentDetailRow {
+    std::string statistic_basis;
+    std::string time_source;
+    std::string selected_time;
     std::string event_id;
     std::string campus;
     std::string patient_no;
@@ -609,12 +643,25 @@ struct MassiveTransfusionComponentDetailRow {
     std::string conversion_factor;
     std::string converted_ml;
     std::string data_status;
+    std::string cross_match_id;
+    std::string blood_in_id;
+    std::string blood_bag_no;
+    std::string product_code;
+    std::string verify_state;
+    std::string match_date;
+    std::string blood_out_date;
+    std::string check_date;
+    int blood_out_record_count = 0;
     bool counted = false;
     bool rejected = false;
     bool excluded_by_component_filter = false;
+    bool cross_match_deleted = false;
+    bool application_anomaly = false;
 };
 
 struct MassiveTransfusionEventRow {
+    std::string statistic_basis;
+    std::string time_source;
     std::string event_id;
     std::string campus;
     std::string patient_no;
@@ -635,12 +682,15 @@ struct MassiveTransfusionEventRow {
     int component_count = 0;
     int rejected_application_count = 0;
     int issue_count = 0;
+    int audit_count = 0;
     bool qualifies = false;
     bool complete = true;
+    bool cross_department = false;
     std::vector<MassiveTransfusionComponentDetailRow> components;
 };
 
 struct MassiveTransfusionStatSummary {
+    int raw_record_count = 0;
     int event_count = 0;
     int patient_count = 0;
     int application_count = 0;
@@ -649,6 +699,7 @@ struct MassiveTransfusionStatSummary {
     int issue_event_count = 0;
     int issue_component_count = 0;
     int rejected_application_count = 0;
+    int audit_record_count = 0;
     int missing_patient_no_count = 0;
     int missing_apply_form_no_count = 0;
 };
@@ -769,12 +820,19 @@ bool build_massive_transfusion_statistics(const MassiveTransfusionStatQuery& que
                                           const std::vector<MassiveTransfusionRawRow>& raw_rows,
                                           MassiveTransfusionStatSummary& summary,
                                           std::vector<MassiveTransfusionEventRow>& events,
-                                          std::vector<MassiveTransfusionComponentDetailRow>& orphan_rejected,
+                                          std::vector<MassiveTransfusionComponentDetailRow>& audit_rows,
                                           std::string& error);
+bool build_actual_massive_transfusion_statistics(
+    const MassiveTransfusionStatQuery& query,
+    const std::vector<ActualTransfusionRawRow>& raw_rows,
+    MassiveTransfusionStatSummary& summary,
+    std::vector<MassiveTransfusionEventRow>& events,
+    std::vector<MassiveTransfusionComponentDetailRow>& audit_rows,
+    std::string& error);
 bool query_massive_transfusion_statistics(const MassiveTransfusionStatQuery& query,
                                           MassiveTransfusionStatSummary& summary,
                                           std::vector<MassiveTransfusionEventRow>& events,
-                                          std::vector<MassiveTransfusionComponentDetailRow>& orphan_rejected,
+                                          std::vector<MassiveTransfusionComponentDetailRow>& audit_rows,
                                           std::string& error, LogFn log = {});
 bool query_immune_duplicate_statistics(const ImmuneDuplicateStatQuery& query, ImmuneDuplicateStatSummary& summary, std::vector<ImmuneDuplicateStatDetailRow>& rows, std::string& error, LogFn log = {});
 bool query_outpatient_charges(const OutpatientChargeQuery& query, std::vector<OutpatientChargeRow>& rows, std::string& error, LogFn log = {});

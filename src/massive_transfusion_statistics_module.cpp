@@ -15,6 +15,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -30,8 +31,8 @@ namespace {
 constexpr const wchar_t* WND_CLASS = L"MassiveTransfusionStatisticsModuleChild";
 constexpr const wchar_t* WINDOW_TITLE = L"大量输血统计";
 constexpr const wchar_t* PROP_STATE = L"MassiveTransfusionStatisticsSt";
-constexpr const char* RULE_VERSION = "v2";
-constexpr const wchar_t* RULE_VERSION_W = L"v2";
+constexpr const char* RULE_VERSION = "v3";
+constexpr const wchar_t* RULE_VERSION_W = L"v3";
 constexpr UINT WM_QUERY_LOADED = WM_APP + 0x576;
 
 enum ControlId {
@@ -49,14 +50,16 @@ enum ControlId {
     IDC_INCLUDE_PLATELET_CRYO,
     IDC_THRESHOLD_VALUE,
     IDC_THRESHOLD_OPERATOR,
+    IDC_STATISTIC_BASIS,
+    IDC_EVENT_TIME_SOURCE,
 };
 
 struct Column { const wchar_t* title; int width; };
 
 constexpr Column SUMMARY_COLUMNS[] = {
-    {L"大量输血事件", 130}, {L"涉及患者", 110}, {L"有效申请单", 120},
-    {L"计量制品项", 120}, {L"累计申请量(ml)", 145}, {L"异常事件", 110},
-    {L"异常制品项", 120}, {L"已驳回申请", 120}, {L"空病人号", 105},
+    {L"大量输血事件", 130}, {L"涉及患者", 110}, {L"关联申请单", 120},
+    {L"计量项/血袋", 120}, {L"累计折算量(ml)", 145}, {L"异常事件", 110},
+    {L"异常项", 120}, {L"核查记录", 120}, {L"空病人号", 105},
     {L"空申请单号", 120},
 };
 
@@ -85,10 +88,10 @@ enum EventColumn {
 
 constexpr Column EVENT_COLUMNS[] = {
     {L"结果", 90}, {L"院区", 65}, {L"病人号", 125}, {L"姓名", 85},
-    {L"患者类型", 85}, {L"首次申请时间", 145}, {L"窗口结束时间", 145},
-    {L"最后申请时间", 145}, {L"折算总量(ml)", 115}, {L"有效申请单", 95},
-    {L"计量制品项", 95}, {L"已驳回申请", 95}, {L"第一张申请单", 155},
-    {L"全部申请单", 260}, {L"制品构成", 320}, {L"申请科室", 175},
+    {L"患者类型", 85}, {L"事件起始时间", 145}, {L"窗口结束时间", 145},
+    {L"最后计量时间", 145}, {L"折算总量(ml)", 115}, {L"关联申请单", 95},
+    {L"计量项/血袋", 95}, {L"核查记录", 95}, {L"首袋关联申请单", 155},
+    {L"全部申请单", 260}, {L"实际输血制品构成", 320}, {L"申请科室", 175},
     {L"床号", 65}, {L"申请状态", 145}, {L"数据状态", 125},
 };
 
@@ -100,6 +103,18 @@ enum ComponentColumn {
     COMPONENT_FORM,
     COMPONENT_TIME,
     COMPONENT_STATUS,
+    COMPONENT_BASIS,
+    COMPONENT_TIME_SOURCE,
+    COMPONENT_SELECTED_TIME,
+    COMPONENT_VERIFY_STATE,
+    COMPONENT_CROSS_MATCH_ID,
+    COMPONENT_BLOOD_IN_ID,
+    COMPONENT_BAG_NO,
+    COMPONENT_PRODUCT_CODE,
+    COMPONENT_MATCH_DATE,
+    COMPONENT_OUT_DATE,
+    COMPONENT_CHECK_DATE,
+    COMPONENT_OUT_COUNT,
     COMPONENT_COUNTED,
     COMPONENT_NAME,
     COMPONENT_NUM,
@@ -116,7 +131,11 @@ enum ComponentColumn {
 constexpr Column COMPONENT_COLUMNS[] = {
     {L"事件起点", 145}, {L"院区", 65}, {L"病人号", 125}, {L"姓名", 85},
     {L"申请单号", 155}, {L"申请时间", 145}, {L"申请状态", 90},
-    {L"是否计量", 80}, {L"血液制品", 190}, {L"申请数量", 90},
+    {L"统计口径", 95}, {L"时间口径", 105}, {L"事件时间", 145},
+    {L"实际输血状态", 105}, {L"交叉配血ID", 105}, {L"血袋ID", 105},
+    {L"血袋号", 135}, {L"产品码", 120}, {L"配血时间", 145},
+    {L"出库时间", 145}, {L"血库审核时间", 145}, {L"出库记录数", 95},
+    {L"是否计量", 80}, {L"血液制品", 190}, {L"数量/规格", 90},
     {L"原单位", 75}, {L"换算因子", 85}, {L"折算量(ml)", 105},
     {L"申请科室", 175}, {L"床号", 65}, {L"申请医生", 90}, {L"数据状态", 190},
 };
@@ -134,6 +153,8 @@ struct State {
     HWND toLabel = nullptr;
     HWND campusLabel = nullptr;
     HWND thresholdLabel = nullptr;
+    HWND basisLabel = nullptr;
+    HWND timeSourceLabel = nullptr;
     HWND thresholdUnitLabel = nullptr;
     HWND detailLabel = nullptr;
     HWND startDate = nullptr;
@@ -142,6 +163,8 @@ struct State {
     HWND includePlateletCryo = nullptr;
     HWND thresholdValue = nullptr;
     HWND thresholdOperator = nullptr;
+    HWND statisticBasis = nullptr;
+    HWND eventTimeSource = nullptr;
     HWND detailMode = nullptr;
     HWND query = nullptr;
     HWND exportEvents = nullptr;
@@ -159,11 +182,13 @@ struct State {
     bool loadedIncludePlateletCryo = false;
     double loadedThresholdMl = 1600.0;
     bool loadedThresholdInclusive = true;
+    std::string loadedStatisticBasis = "actual";
+    std::string loadedEventTimeSource = "match";
     int eventSortColumn = EVENT_FIRST_TIME;
     bool eventSortAscending = false;
     Summary totals;
     std::vector<EventRow> eventRows;
-    std::vector<ComponentRow> orphanRejected;
+    std::vector<ComponentRow> auditRows;
     std::vector<ComponentRow> visibleComponents;
 };
 
@@ -175,10 +200,13 @@ struct QueryResult {
     bool includePlateletCryo = false;
     double thresholdMl = 1600.0;
     bool thresholdInclusive = true;
+    std::string statisticBasis = "actual";
+    std::string eventTimeSource = "match";
+    long long elapsedMs = 0;
     std::string error;
     Summary summary;
     std::vector<EventRow> events;
-    std::vector<ComponentRow> orphanRejected;
+    std::vector<ComponentRow> auditRows;
 };
 
 int S(HWND hwnd, int value) {
@@ -222,6 +250,26 @@ void initList(HWND list, const Column* columns, int count) {
         col.iSubItem = i;
         ListView_InsertColumn(list, i, &col);
     }
+}
+
+const wchar_t* eventCompositionColumnTitle(bool actual) {
+    return actual ? L"实际输血制品构成" : L"申请制品构成";
+}
+
+void setEventCompositionColumnTitle(State* state, bool actual) {
+    if (!state || !state->events) return;
+    LVCOLUMNW column{};
+    column.mask = LVCF_TEXT;
+    column.pszText = const_cast<wchar_t*>(eventCompositionColumnTitle(actual));
+    ListView_SetColumn(state->events, EVENT_COMPOSITIONS, &column);
+}
+
+const wchar_t* eventColumnTitle(const State* state, int column) {
+    if (column == EVENT_COMPOSITIONS) {
+        return eventCompositionColumnTitle(
+            state && state->loadedStatisticBasis == "actual");
+    }
+    return EVENT_COLUMNS[column].title;
 }
 
 void addComboItems(HWND combo, const wchar_t* const* items, int count) {
@@ -322,7 +370,8 @@ std::string eventCell(const EventRow& row, int column) {
         case EVENT_TOTAL_ML: return row.total_ml;
         case EVENT_APPLY_COUNT: return std::to_string(row.application_count);
         case EVENT_COMPONENT_COUNT: return std::to_string(row.component_count);
-        case EVENT_REJECTED_COUNT: return std::to_string(row.rejected_application_count);
+        case EVENT_REJECTED_COUNT: return std::to_string(
+            row.statistic_basis == "actual" ? row.audit_count : row.rejected_application_count);
         case EVENT_FIRST_FORM: return row.first_apply_form_no;
         case EVENT_FORMS: return row.apply_form_nos;
         case EVENT_COMPOSITIONS: return row.composition_summary;
@@ -336,13 +385,26 @@ std::string eventCell(const EventRow& row, int column) {
 
 std::string componentCell(const ComponentRow& row, int column) {
     switch (column) {
-        case COMPONENT_EVENT: return row.event_id.empty() ? "独立已驳回" : row.event_id.substr(row.event_id.find('@') + 1);
+        case COMPONENT_EVENT: return row.event_id.empty() ? "异常核查" : row.event_id.substr(row.event_id.find('@') + 1);
         case COMPONENT_CAMPUS: return row.campus;
         case COMPONENT_PATIENT_NO: return row.patient_no;
         case COMPONENT_PATIENT_NAME: return row.patient_name;
         case COMPONENT_FORM: return row.apply_form_no;
         case COMPONENT_TIME: return row.apply_time;
         case COMPONENT_STATUS: return row.apply_status;
+        case COMPONENT_BASIS: return row.statistic_basis == "actual" ? "实际输血量" : "申请量对照";
+        case COMPONENT_TIME_SOURCE: return row.time_source;
+        case COMPONENT_SELECTED_TIME: return row.selected_time;
+        case COMPONENT_VERIFY_STATE: return row.verify_state;
+        case COMPONENT_CROSS_MATCH_ID: return row.cross_match_id;
+        case COMPONENT_BLOOD_IN_ID: return row.blood_in_id;
+        case COMPONENT_BAG_NO: return row.blood_bag_no;
+        case COMPONENT_PRODUCT_CODE: return row.product_code;
+        case COMPONENT_MATCH_DATE: return row.match_date;
+        case COMPONENT_OUT_DATE: return row.blood_out_date;
+        case COMPONENT_CHECK_DATE: return row.check_date;
+        case COMPONENT_OUT_COUNT: return row.blood_out_record_count > 0
+            ? std::to_string(row.blood_out_record_count) : std::string{};
         case COMPONENT_COUNTED: return row.counted ? "是" : "否";
         case COMPONENT_NAME: return row.composition;
         case COMPONENT_NUM: return row.apply_num;
@@ -371,7 +433,7 @@ void populateSummary(State* state) {
         numberText(state->totals.total_ml),
         std::to_string(state->totals.issue_event_count),
         std::to_string(state->totals.issue_component_count),
-        std::to_string(state->totals.rejected_application_count),
+        std::to_string(state->totals.audit_record_count),
         std::to_string(state->totals.missing_patient_no_count),
         std::to_string(state->totals.missing_apply_form_no_count),
     };
@@ -404,8 +466,8 @@ void refreshComponentScope(State* state) {
     if (!state) return;
     state->visibleComponents.clear();
     const std::wstring mode = comboText(state->detailMode);
-    if (mode == L"独立已驳回") {
-        state->visibleComponents = state->orphanRejected;
+    if (mode == L"异常核查") {
+        state->visibleComponents = state->auditRows;
     } else if (mode == L"全部事件成分") {
         for (const auto& event : state->eventRows) {
             state->visibleComponents.insert(state->visibleComponents.end(), event.components.begin(), event.components.end());
@@ -439,6 +501,9 @@ void setQueryEnabled(State* state, bool enabled) {
     EnableWindow(state->includePlateletCryo, enabled);
     EnableWindow(state->thresholdValue, enabled);
     EnableWindow(state->thresholdOperator, enabled);
+    EnableWindow(state->statisticBasis, enabled);
+    const bool actual = SendMessageW(state->statisticBasis, CB_GETCURSEL, 0, 0) == 0;
+    EnableWindow(state->eventTimeSource, enabled && actual);
     EnableWindow(state->query, enabled);
 }
 
@@ -461,6 +526,9 @@ void resizeLayout(HWND hwnd, State* state) {
     MoveWindow(state->campusLabel, x, y + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
     MoveWindow(state->campus, x, y, S(hwnd, 82), S(hwnd, 180), TRUE); x += S(hwnd, 96);
     MoveWindow(state->includePlateletCryo, x, y, S(hwnd, 174), h, TRUE); x += S(hwnd, 180);
+    labelWidth = search::measure_control_text_width(hwnd, state->basisLabel, 70);
+    MoveWindow(state->basisLabel, x, y + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
+    MoveWindow(state->statisticBasis, x, y, S(hwnd, 112), S(hwnd, 120), TRUE);
     const int secondY = S(hwnd, 42);
     x = pad;
     labelWidth = search::measure_control_text_width(hwnd, state->thresholdLabel, 75);
@@ -468,6 +536,9 @@ void resizeLayout(HWND hwnd, State* state) {
     MoveWindow(state->thresholdOperator, x, secondY, S(hwnd, 92), S(hwnd, 120), TRUE); x += S(hwnd, 100);
     MoveWindow(state->thresholdValue, x, secondY, S(hwnd, 88), h, TRUE); x += S(hwnd, 92);
     MoveWindow(state->thresholdUnitLabel, x, secondY + S(hwnd, 2), S(hwnd, 28), h, TRUE); x += S(hwnd, 38);
+    labelWidth = search::measure_control_text_width(hwnd, state->timeSourceLabel, 75);
+    MoveWindow(state->timeSourceLabel, x, secondY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
+    MoveWindow(state->eventTimeSource, x, secondY, S(hwnd, 116), S(hwnd, 150), TRUE); x += S(hwnd, 124);
     MoveWindow(state->query, x, secondY - S(hwnd, 1), S(hwnd, 62), S(hwnd, 27), TRUE); x += S(hwnd, 70);
     MoveWindow(state->exportEvents, x, secondY - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE); x += S(hwnd, 96);
     MoveWindow(state->exportComponents, x, secondY - S(hwnd, 1), S(hwnd, 104), S(hwnd, 27), TRUE);
@@ -501,11 +572,17 @@ void runQuery(HWND hwnd, State* state) {
     query.start_date = dateText(state->startDate);
     query.end_date = dateText(state->endDate);
     query.campus = search::wide_to_utf8(comboText(state->campus));
+    query.statistic_basis = SendMessageW(state->statisticBasis, CB_GETCURSEL, 0, 0) == 0
+        ? "actual" : "application";
+    const int time_index = static_cast<int>(SendMessageW(state->eventTimeSource, CB_GETCURSEL, 0, 0));
+    query.event_time_source = time_index == 1 ? "out" : time_index == 2 ? "apply" :
+                              time_index == 3 ? "check" : "match";
+    if (query.statistic_basis == "application") query.event_time_source = "apply";
     query.include_platelet_and_cryoprecipitate =
         SendMessageW(state->includePlateletCryo, BM_GETCHECK, 0, 0) == BST_CHECKED;
     query.threshold_inclusive = SendMessageW(state->thresholdOperator, CB_GETCURSEL, 0, 0) != 1;
     if (query.start_date.empty() || query.end_date.empty() || query.start_date > query.end_date) {
-        MessageBoxW(hwnd, L"首次申请开始日期不能晚于结束日期。", WINDOW_TITLE, MB_ICONWARNING);
+        MessageBoxW(hwnd, L"事件开始日期不能晚于结束日期。", WINDOW_TITLE, MB_ICONWARNING);
         return;
     }
     if (!parseThreshold(state->thresholdValue, query.threshold_ml)) {
@@ -521,14 +598,19 @@ void runQuery(HWND hwnd, State* state) {
     setStatus(state, L"正在查询并计算24小时大量输血事件...");
     std::thread([hwnd, query]() {
         auto* result = new QueryResult();
+        const auto started = std::chrono::steady_clock::now();
         result->startDate = query.start_date;
         result->endDate = query.end_date;
         result->campus = query.campus;
         result->includePlateletCryo = query.include_platelet_and_cryoprecipitate;
         result->thresholdMl = query.threshold_ml;
         result->thresholdInclusive = query.threshold_inclusive;
+        result->statisticBasis = query.statistic_basis;
+        result->eventTimeSource = query.event_time_source;
         result->ok = search::query_massive_transfusion_statistics(
-            query, result->summary, result->events, result->orphanRejected, result->error);
+            query, result->summary, result->events, result->auditRows, result->error);
+        result->elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
         if (!PostMessageW(hwnd, WM_QUERY_LOADED, 0, reinterpret_cast<LPARAM>(result))) delete result;
     }).detach();
 }
@@ -576,7 +658,11 @@ std::wstring defaultName(State* state, const wchar_t* suffix) {
 }
 
 std::string exportMetadata(State* state) {
-    return "," + thresholdCondition(state->loadedThresholdMl,
+    const std::string basis = state->loadedStatisticBasis == "actual" ? "实际输血量" : "申请量对照";
+    const std::string time = state->loadedEventTimeSource == "out" ? "出库时间" :
+        state->loadedEventTimeSource == "apply" ? "申请时间" :
+        state->loadedEventTimeSource == "check" ? "血库审核时间" : "配血时间";
+    return "," + basis + "," + time + "," + thresholdCondition(state->loadedThresholdMl,
                                      state->loadedThresholdInclusive) + "," +
            (state->loadedIncludePlateletCryo ? "是," : "否,") + RULE_VERSION + "\n";
 }
@@ -591,9 +677,9 @@ void exportEventCsv(HWND hwnd, State* state) {
     std::string csv = "\xEF\xBB\xBF";
     for (int col = 0; col < EVENT_COLUMN_COUNT; ++col) {
         if (col) csv.push_back(',');
-        csv += csvEscape(search::wide_to_utf8(EVENT_COLUMNS[col].title));
+        csv += csvEscape(search::wide_to_utf8(eventColumnTitle(state, col)));
     }
-    csv += ",统计条件,包括血小板和冷沉淀,折算规则版本\n";
+    csv += ",统计口径,事件时间口径,统计条件,包括血小板和冷沉淀,折算规则版本\n";
     for (const auto& row : state->eventRows) {
         for (int col = 0; col < EVENT_COLUMN_COUNT; ++col) {
             if (col) csv.push_back(',');
@@ -612,7 +698,9 @@ void exportComponentCsv(HWND hwnd, State* state) {
     if (!state || !state->hasResult) return;
     std::vector<ComponentRow> rows;
     for (const auto& event : state->eventRows) rows.insert(rows.end(), event.components.begin(), event.components.end());
-    rows.insert(rows.end(), state->orphanRejected.begin(), state->orphanRejected.end());
+    for (const auto& audit : state->auditRows) {
+        if (audit.event_id.empty()) rows.push_back(audit);
+    }
     if (rows.empty()) {
         MessageBoxW(hwnd, L"当前没有可导出的申请成分明细。", WINDOW_TITLE, MB_ICONINFORMATION);
         return;
@@ -624,7 +712,7 @@ void exportComponentCsv(HWND hwnd, State* state) {
         if (col) csv.push_back(',');
         csv += csvEscape(search::wide_to_utf8(COMPONENT_COLUMNS[col].title));
     }
-    csv += ",统计条件,包括血小板和冷沉淀,折算规则版本\n";
+    csv += ",统计口径,事件时间口径,统计条件,包括血小板和冷沉淀,折算规则版本\n";
     for (const auto& row : rows) {
         for (int col = 0; col < COMPONENT_COLUMN_COUNT; ++col) {
             if (col) csv.push_back(',');
@@ -658,7 +746,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             state = reinterpret_cast<State*>(mcs->lParam);
             SetPropW(hwnd, PROP_STATE, state);
             state->bgBrush = CreateSolidBrush(RGB(0xF0, 0xF0, 0xF0));
-            state->startLabel = makeLabel(hwnd, L"首次申请日期：");
+            state->startLabel = makeLabel(hwnd, L"事件日期：");
             state->startDate = makeDate(hwnd, IDC_START_DATE);
             state->toLabel = makeLabel(hwnd, L"至", SS_CENTER);
             state->endDate = makeDate(hwnd, IDC_END_DATE);
@@ -672,6 +760,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 0, 0, 0, 0, hwnd, win32_control_id(IDC_INCLUDE_PLATELET_CRYO),
                 GetModuleHandleW(nullptr), nullptr);
+            state->basisLabel = makeLabel(hwnd, L"统计口径：");
+            state->statisticBasis = makeCombo(hwnd, IDC_STATISTIC_BASIS);
+            const wchar_t* statisticBases[] = {L"实际输血量", L"申请量对照"};
+            addComboItems(state->statisticBasis, statisticBases,
+                          static_cast<int>(std::size(statisticBases)));
             state->thresholdLabel = makeLabel(hwnd, L"统计阈值：");
             state->thresholdOperator = makeCombo(hwnd, IDC_THRESHOLD_OPERATOR);
             const wchar_t* thresholdOperators[] = {L"大于等于", L"大于"};
@@ -684,6 +777,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 GetModuleHandleW(nullptr), nullptr);
             SendMessageW(state->thresholdValue, EM_SETLIMITTEXT, 18, 0);
             state->thresholdUnitLabel = makeLabel(hwnd, L"ml", SS_LEFT);
+            state->timeSourceLabel = makeLabel(hwnd, L"事件时间：");
+            state->eventTimeSource = makeCombo(hwnd, IDC_EVENT_TIME_SOURCE);
+            const wchar_t* timeSources[] = {L"配血时间", L"出库时间", L"申请时间", L"血库审核时间"};
+            addComboItems(state->eventTimeSource, timeSources, static_cast<int>(std::size(timeSources)));
+            EnableWindow(state->eventTimeSource, TRUE);
             state->query = search::create_button(hwnd, IDC_QUERY, L"查询", 0, 0, 0, 0);
             state->exportEvents = search::create_button(hwnd, IDC_EXPORT_EVENTS, L"导出事件", 0, 0, 0, 0);
             state->exportComponents = search::create_button(hwnd, IDC_EXPORT_COMPONENTS, L"导出成分明细", 0, 0, 0, 0);
@@ -691,7 +789,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             EnableWindow(state->exportComponents, FALSE);
             state->status = makeLabel(
                 hwnd,
-                L"请选择首次申请日期后查询。默认口径：不包括血小板和冷沉淀，折算总量 >=1600ml。",
+                L"请选择事件日期后查询。默认按实际输血量和配血时间统计；申请量可作为对照。",
                 SS_LEFT);
             state->summary = makeList(hwnd, IDC_SUMMARY);
             initList(state->summary, SUMMARY_COLUMNS, static_cast<int>(std::size(SUMMARY_COLUMNS)));
@@ -699,7 +797,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             initList(state->events, EVENT_COLUMNS, EVENT_COLUMN_COUNT);
             state->detailLabel = makeLabel(hwnd, L"成分明细：");
             state->detailMode = makeCombo(hwnd, IDC_DETAIL_MODE);
-            const wchar_t* detailModes[] = {L"当前事件", L"全部事件成分", L"独立已驳回"};
+            const wchar_t* detailModes[] = {L"当前事件", L"全部事件成分", L"异常核查"};
             addComboItems(state->detailMode, detailModes, static_cast<int>(std::size(detailModes)));
             state->components = makeList(hwnd, IDC_COMPONENTS);
             initList(state->components, COMPONENT_COLUMNS, COMPONENT_COLUMN_COUNT);
@@ -718,6 +816,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (LOWORD(wp) == IDC_EXPORT_COMPONENTS) { exportComponentCsv(hwnd, state); return 0; }
             if (LOWORD(wp) == IDC_DETAIL_MODE && HIWORD(wp) == CBN_SELCHANGE) {
                 refreshComponentScope(state);
+                return 0;
+            }
+            if (LOWORD(wp) == IDC_STATISTIC_BASIS && HIWORD(wp) == CBN_SELCHANGE) {
+                EnableWindow(state->eventTimeSource,
+                    SendMessageW(state->statisticBasis, CB_GETCURSEL, 0, 0) == 0);
                 return 0;
             }
             break;
@@ -787,19 +890,23 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!result->ok) {
                 EnableWindow(state->exportEvents, state->hasResult && !state->eventRows.empty());
                 EnableWindow(state->exportComponents, state->hasResult);
-                setStatus(state, L"查询失败：" + search::utf8_to_wide(result->error));
+                setStatus(state, L"查询失败（耗时 " + std::to_wstring(result->elapsedMs) +
+                                 L" ms）：" + search::utf8_to_wide(result->error));
                 MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
                 return 0;
             }
             state->totals = result->summary;
             state->eventRows = std::move(result->events);
-            state->orphanRejected = std::move(result->orphanRejected);
+            state->auditRows = std::move(result->auditRows);
             state->loadedStart = result->startDate;
             state->loadedEnd = result->endDate;
             state->loadedCampus = search::utf8_to_wide(result->campus.empty() ? "全部" : result->campus);
             state->loadedIncludePlateletCryo = result->includePlateletCryo;
             state->loadedThresholdMl = result->thresholdMl;
             state->loadedThresholdInclusive = result->thresholdInclusive;
+            state->loadedStatisticBasis = result->statisticBasis;
+            state->loadedEventTimeSource = result->eventTimeSource;
+            setEventCompositionColumnTitle(state, state->loadedStatisticBasis == "actual");
             state->hasResult = true;
             state->eventSortColumn = EVENT_FIRST_TIME;
             state->eventSortAscending = false;
@@ -812,11 +919,18 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             refreshComponentScope(state);
             EnableWindow(state->exportEvents, !state->eventRows.empty());
             EnableWindow(state->exportComponents,
-                         !state->eventRows.empty() || !state->orphanRejected.empty());
-            setStatus(state, L"查询完成：大量输血事件 " + std::to_wstring(state->totals.event_count) +
-                             L" 个，异常事件 " + std::to_wstring(state->totals.issue_event_count) +
-                             L" 个，已驳回申请 " + std::to_wstring(state->totals.rejected_application_count) +
-                             L" 个。院区：" + state->loadedCampus +
+                         !state->eventRows.empty() || !state->auditRows.empty());
+            const std::wstring basisText = state->loadedStatisticBasis == "actual"
+                ? L"实际输血量" : L"申请量对照";
+            const std::wstring timeText = state->loadedEventTimeSource == "out" ? L"出库时间" :
+                state->loadedEventTimeSource == "apply" ? L"申请时间" :
+                state->loadedEventTimeSource == "check" ? L"血库审核时间" : L"配血时间";
+            setStatus(state, L"查询完成：" + basisText + L"口径，大量输血事件 " + std::to_wstring(state->totals.event_count) +
+                             L" 个，原始记录 " + std::to_wstring(state->totals.raw_record_count) +
+                             L" 条，耗时 " + std::to_wstring(result->elapsedMs) + L" ms，" +
+                             L"异常事件 " + std::to_wstring(state->totals.issue_event_count) +
+                             L" 个，核查记录 " + std::to_wstring(state->totals.audit_record_count) +
+                             L" 条。事件时间：" + timeText + L"。院区：" + state->loadedCampus +
                              (state->loadedIncludePlateletCryo
                                   ? L"。已包括血小板和冷沉淀，规则 "
                                   : L"。未包括血小板和冷沉淀，规则 ") +
