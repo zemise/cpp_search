@@ -639,36 +639,42 @@ void resizeLayout(HWND hwnd, State* state) {
     const int firstRowY = filterTop + S(hwnd, 19);
     const int secondRowY = firstRowY + h + S(hwnd, 5);
     const int filterBottom = secondRowY + S(hwnd, 27) + S(hwnd, 6);
-    MoveWindow(state->filterGroup, S(hwnd, 5), filterTop,
+    const int filterLeft = S(hwnd, 5);
+    const int contentLeft = filterLeft + S(hwnd, 16);
+    const int labelGap = S(hwnd, 6);
+    const int unitGap = S(hwnd, 4);
+    const int controlGap = S(hwnd, 8);
+    const int sectionGap = S(hwnd, 16);
+    MoveWindow(state->filterGroup, filterLeft, filterTop,
                width - S(hwnd, 10), filterBottom - filterTop, TRUE);
     const int leadingLabelWidth = (std::max)(
-        search::measure_control_text_width(hwnd, state->startLabel, 105),
-        search::measure_control_text_width(hwnd, state->thresholdLabel, 105));
-    int x = pad;
+        search::measure_control_text_width(hwnd, state->startLabel, 82),
+        search::measure_control_text_width(hwnd, state->thresholdLabel, 82));
+    int x = contentLeft;
     int labelWidth = leadingLabelWidth;
-    MoveWindow(state->startLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->startDate, x, firstRowY, S(hwnd, 118), h, TRUE); x += S(hwnd, 126);
-    MoveWindow(state->toLabel, x, firstRowY + S(hwnd, 2), S(hwnd, 20), h, TRUE); x += S(hwnd, 26);
-    MoveWindow(state->endDate, x, firstRowY, S(hwnd, 118), h, TRUE); x += S(hwnd, 136);
+    MoveWindow(state->startLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + labelGap;
+    MoveWindow(state->startDate, x, firstRowY, S(hwnd, 118), h, TRUE); x += S(hwnd, 118) + controlGap;
+    MoveWindow(state->toLabel, x, firstRowY + S(hwnd, 2), S(hwnd, 20), h, TRUE); x += S(hwnd, 20) + controlGap;
+    MoveWindow(state->endDate, x, firstRowY, S(hwnd, 118), h, TRUE); x += S(hwnd, 118) + sectionGap;
     labelWidth = search::measure_control_text_width(hwnd, state->campusLabel, 50);
-    MoveWindow(state->campusLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->campus, x, firstRowY, S(hwnd, 82), S(hwnd, 180), TRUE); x += S(hwnd, 96);
+    MoveWindow(state->campusLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + labelGap;
+    MoveWindow(state->campus, x, firstRowY, S(hwnd, 82), S(hwnd, 180), TRUE); x += S(hwnd, 82) + sectionGap;
     labelWidth = search::measure_control_text_width(hwnd, state->basisLabel, 70);
-    MoveWindow(state->basisLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->statisticBasis, x, firstRowY, S(hwnd, 112), S(hwnd, 120), TRUE); x += S(hwnd, 120);
+    MoveWindow(state->basisLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + labelGap;
+    MoveWindow(state->statisticBasis, x, firstRowY, S(hwnd, 112), S(hwnd, 120), TRUE); x += S(hwnd, 112) + sectionGap;
     labelWidth = search::measure_control_text_width(hwnd, state->timeSourceLabel, 75);
-    MoveWindow(state->timeSourceLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
+    MoveWindow(state->timeSourceLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + labelGap;
     MoveWindow(state->eventTimeSource, x, firstRowY, S(hwnd, 116), S(hwnd, 150), TRUE);
 
-    x = pad;
+    x = contentLeft;
     labelWidth = leadingLabelWidth;
-    MoveWindow(state->thresholdLabel, x, secondRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->thresholdOperator, x, secondRowY, S(hwnd, 92), S(hwnd, 120), TRUE); x += S(hwnd, 100);
-    MoveWindow(state->thresholdValue, x, secondRowY, S(hwnd, 88), h, TRUE); x += S(hwnd, 92);
-    MoveWindow(state->thresholdUnitLabel, x, secondRowY + S(hwnd, 2), S(hwnd, 28), h, TRUE); x += S(hwnd, 38);
-    MoveWindow(state->includePlateletCryo, x, secondRowY, S(hwnd, 174), h, TRUE); x += S(hwnd, 184);
-    MoveWindow(state->query, x, secondRowY - S(hwnd, 1), S(hwnd, 62), S(hwnd, 27), TRUE); x += S(hwnd, 70);
-    MoveWindow(state->exportEvents, x, secondRowY - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE); x += S(hwnd, 96);
+    MoveWindow(state->thresholdLabel, x, secondRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + labelGap;
+    MoveWindow(state->thresholdOperator, x, secondRowY, S(hwnd, 92), S(hwnd, 120), TRUE); x += S(hwnd, 92) + controlGap;
+    MoveWindow(state->thresholdValue, x, secondRowY, S(hwnd, 88), h, TRUE); x += S(hwnd, 88) + unitGap;
+    MoveWindow(state->thresholdUnitLabel, x, secondRowY + S(hwnd, 2), S(hwnd, 28), h, TRUE); x += S(hwnd, 28) + sectionGap;
+    MoveWindow(state->includePlateletCryo, x, secondRowY, S(hwnd, 174), h, TRUE); x += S(hwnd, 174) + sectionGap;
+    MoveWindow(state->query, x, secondRowY - S(hwnd, 1), S(hwnd, 62), S(hwnd, 27), TRUE); x += S(hwnd, 62) + controlGap;
+    MoveWindow(state->exportEvents, x, secondRowY - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE); x += S(hwnd, 88) + controlGap;
     MoveWindow(state->exportComponents, x, secondRowY - S(hwnd, 1), S(hwnd, 86), S(hwnd, 27), TRUE);
 
     const int statusTop = filterBottom + S(hwnd, 4);
