@@ -15,6 +15,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -32,7 +33,6 @@ constexpr const wchar_t* WND_CLASS = L"MassiveTransfusionStatisticsModuleChild";
 constexpr const wchar_t* WINDOW_TITLE = L"大量输血统计";
 constexpr const wchar_t* PROP_STATE = L"MassiveTransfusionStatisticsSt";
 constexpr const char* RULE_VERSION = "v3";
-constexpr const wchar_t* RULE_VERSION_W = L"v3";
 constexpr UINT WM_QUERY_LOADED = WM_APP + 0x576;
 
 enum ControlId {
@@ -42,7 +42,6 @@ enum ControlId {
     IDC_QUERY,
     IDC_EXPORT_EVENTS,
     IDC_EXPORT_COMPONENTS,
-    IDC_SUMMARY,
     IDC_EVENTS,
     IDC_COMPONENTS,
     IDC_STATUS,
@@ -55,13 +54,6 @@ enum ControlId {
 };
 
 struct Column { const wchar_t* title; int width; };
-
-constexpr Column SUMMARY_COLUMNS[] = {
-    {L"大量输血事件", 130}, {L"涉及患者", 110}, {L"关联申请单", 120},
-    {L"计量项/血袋", 120}, {L"累计折算量(ml)", 145}, {L"异常事件", 110},
-    {L"异常项", 120}, {L"核查记录", 120}, {L"空病人号", 105},
-    {L"空申请单号", 120},
-};
 
 enum EventColumn {
     EVENT_RESULT,
@@ -156,7 +148,8 @@ struct State {
     HWND basisLabel = nullptr;
     HWND timeSourceLabel = nullptr;
     HWND thresholdUnitLabel = nullptr;
-    HWND detailLabel = nullptr;
+    HWND filterGroup = nullptr;
+    HWND detailContext = nullptr;
     HWND startDate = nullptr;
     HWND endDate = nullptr;
     HWND campus = nullptr;
@@ -169,7 +162,7 @@ struct State {
     HWND query = nullptr;
     HWND exportEvents = nullptr;
     HWND exportComponents = nullptr;
-    HWND summary = nullptr;
+    std::array<HWND, 6> summaryCards{};
     HWND events = nullptr;
     HWND components = nullptr;
     HWND status = nullptr;
@@ -241,6 +234,26 @@ HWND makeList(HWND parent, int id) {
     return list;
 }
 
+HWND makeSummaryCard(HWND parent) {
+    return CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE | SS_CENTER,
+        0, 0, 0, 0, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
+}
+
+HWND makeTab(HWND parent, int id) {
+    return CreateWindowExW(
+        0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        0, 0, 0, 0, parent, win32_control_id(id), GetModuleHandleW(nullptr), nullptr);
+}
+
+void addTab(HWND tab, int index, const wchar_t* title) {
+    TCITEMW item{};
+    item.mask = TCIF_TEXT;
+    item.pszText = const_cast<wchar_t*>(title);
+    TabCtrl_InsertItem(tab, index, &item);
+}
+
 void initList(HWND list, const Column* columns, int count) {
     for (int i = 0; i < count; ++i) {
         LVCOLUMNW col{};
@@ -270,6 +283,79 @@ const wchar_t* eventColumnTitle(const State* state, int column) {
             state && state->loadedStatisticBasis == "actual");
     }
     return EVENT_COLUMNS[column].title;
+}
+
+bool isDefaultEventColumn(int column) {
+    switch (column) {
+        case EVENT_RESULT:
+        case EVENT_CAMPUS:
+        case EVENT_PATIENT_NO:
+        case EVENT_PATIENT_NAME:
+        case EVENT_FIRST_TIME:
+        case EVENT_WINDOW_END:
+        case EVENT_TOTAL_ML:
+        case EVENT_COMPONENT_COUNT:
+        case EVENT_COMPOSITIONS:
+        case EVENT_DEPT:
+        case EVENT_DATA_STATUS:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isDefaultComponentColumn(int column, bool actual) {
+    switch (column) {
+        case COMPONENT_EVENT:
+        case COMPONENT_PATIENT_NO:
+        case COMPONENT_PATIENT_NAME:
+        case COMPONENT_FORM:
+        case COMPONENT_SELECTED_TIME:
+        case COMPONENT_COUNTED:
+        case COMPONENT_NAME:
+        case COMPONENT_NUM:
+        case COMPONENT_UNIT:
+        case COMPONENT_ML:
+        case COMPONENT_DEPT:
+        case COMPONENT_DATA_STATUS:
+            return true;
+        case COMPONENT_BAG_NO:
+            return actual;
+        case COMPONENT_TIME:
+        case COMPONENT_STATUS:
+            return !actual;
+        default:
+            return false;
+    }
+}
+
+void applyDefaultColumnLayout(State* state, bool actual) {
+    if (!state) return;
+    for (int column = 0; column < EVENT_COLUMN_COUNT; ++column) {
+        ListView_SetColumnWidth(
+            state->events, column,
+            isDefaultEventColumn(column) ? EVENT_COLUMNS[column].width : 0);
+    }
+    for (int column = 0; column < COMPONENT_COLUMN_COUNT; ++column) {
+        ListView_SetColumnWidth(
+            state->components, column,
+            isDefaultComponentColumn(column, actual) ? COMPONENT_COLUMNS[column].width : 0);
+    }
+}
+
+void updateDetailTabTitles(State* state, bool actual) {
+    if (!state || !state->detailMode) return;
+    const wchar_t* titles[] = {
+        actual ? L"当前事件血袋" : L"当前事件成分",
+        actual ? L"全部血袋" : L"全部成分",
+        L"异常核查",
+    };
+    for (int index = 0; index < static_cast<int>(std::size(titles)); ++index) {
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = const_cast<wchar_t*>(titles[index]);
+        TabCtrl_SetItem(state->detailMode, index, &item);
+    }
 }
 
 void addComboItems(HWND combo, const wchar_t* const* items, int count) {
@@ -424,20 +510,28 @@ void setStatus(State* state, const std::wstring& text) {
 }
 
 void populateSummary(State* state) {
-    ListView_DeleteAllItems(state->summary);
-    const std::string values[] = {
-        std::to_string(state->totals.event_count),
-        std::to_string(state->totals.patient_count),
-        std::to_string(state->totals.application_count),
-        std::to_string(state->totals.component_count),
-        numberText(state->totals.total_ml),
-        std::to_string(state->totals.issue_event_count),
-        std::to_string(state->totals.issue_component_count),
-        std::to_string(state->totals.audit_record_count),
-        std::to_string(state->totals.missing_patient_no_count),
-        std::to_string(state->totals.missing_apply_form_no_count),
+    if (!state) return;
+    const bool actual = state->loadedStatisticBasis == "actual";
+    const std::wstring titles[] = {
+        L"大量输血事件",
+        L"涉及患者",
+        actual ? L"实际输血总量" : L"申请折算总量",
+        actual ? L"实际血袋" : L"计量制品项",
+        L"异常事件",
+        L"核查记录",
     };
-    for (int col = 0; col < static_cast<int>(std::size(values)); ++col) setCell(state->summary, 0, col, values[col]);
+    const std::wstring values[] = {
+        std::to_wstring(state->totals.event_count),
+        std::to_wstring(state->totals.patient_count),
+        search::utf8_to_wide(numberText(state->totals.total_ml)) + L" ml",
+        std::to_wstring(state->totals.component_count),
+        std::to_wstring(state->totals.issue_event_count),
+        std::to_wstring(state->totals.audit_record_count),
+    };
+    for (int index = 0; index < static_cast<int>(state->summaryCards.size()); ++index) {
+        const std::wstring text = titles[index] + L"\r\n" + values[index];
+        SetWindowTextW(state->summaryCards[static_cast<size_t>(index)], text.c_str());
+    }
 }
 
 void populateEvents(State* state) {
@@ -462,13 +556,38 @@ void populateComponents(State* state) {
     InvalidateRect(state->components, nullptr, TRUE);
 }
 
+void refreshDetailContext(State* state) {
+    if (!state || !state->detailContext) return;
+    if (TabCtrl_GetCurSel(state->detailMode) == 2) {
+        SetWindowTextW(
+            state->detailContext,
+            (L"异常核查：" + std::to_wstring(state->auditRows.size()) + L" 条").c_str());
+        return;
+    }
+    const int selected = ListView_GetNextItem(state->events, -1, LVNI_SELECTED);
+    if (selected < 0 || selected >= static_cast<int>(state->eventRows.size())) {
+        SetWindowTextW(state->detailContext, L"请选择一个事件查看明细。 ");
+        return;
+    }
+    const auto& event = state->eventRows[static_cast<size_t>(selected)];
+    const std::wstring itemTitle = state->loadedStatisticBasis == "actual" ? L"血袋：" : L"计量项：";
+    const std::wstring text =
+        L"患者：" + search::utf8_to_wide(event.patient_name) + L"（" +
+        search::utf8_to_wide(event.patient_no) + L"）  事件：" +
+        search::utf8_to_wide(event.first_apply_time) + L" 至 " +
+        search::utf8_to_wide(event.window_end_time) + L"  折算量：" +
+        search::utf8_to_wide(event.total_ml) + L" ml  " + itemTitle +
+        std::to_wstring(event.component_count);
+    SetWindowTextW(state->detailContext, text.c_str());
+}
+
 void refreshComponentScope(State* state) {
     if (!state) return;
     state->visibleComponents.clear();
-    const std::wstring mode = comboText(state->detailMode);
-    if (mode == L"异常核查") {
+    const int mode = TabCtrl_GetCurSel(state->detailMode);
+    if (mode == 2) {
         state->visibleComponents = state->auditRows;
-    } else if (mode == L"全部事件成分") {
+    } else if (mode == 1) {
         for (const auto& event : state->eventRows) {
             state->visibleComponents.insert(state->visibleComponents.end(), event.components.begin(), event.components.end());
         }
@@ -478,6 +597,7 @@ void refreshComponentScope(State* state) {
             state->visibleComponents = state->eventRows[static_cast<size_t>(selected)].components;
         }
     }
+    refreshDetailContext(state);
     populateComponents(state);
 }
 
@@ -515,49 +635,63 @@ void resizeLayout(HWND hwnd, State* state) {
     const int height = rc.bottom;
     const int pad = S(hwnd, 10);
     const int h = S(hwnd, 25);
-    const int y = S(hwnd, 9);
+    const int filterTop = S(hwnd, 2);
+    const int firstRowY = filterTop + S(hwnd, 19);
+    const int secondRowY = firstRowY + h + S(hwnd, 5);
+    const int filterBottom = secondRowY + S(hwnd, 27) + S(hwnd, 6);
+    MoveWindow(state->filterGroup, S(hwnd, 5), filterTop,
+               width - S(hwnd, 10), filterBottom - filterTop, TRUE);
+    const int leadingLabelWidth = (std::max)(
+        search::measure_control_text_width(hwnd, state->startLabel, 105),
+        search::measure_control_text_width(hwnd, state->thresholdLabel, 105));
     int x = pad;
-    int labelWidth = search::measure_control_text_width(hwnd, state->startLabel, 105);
-    MoveWindow(state->startLabel, x, y + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->startDate, x, y, S(hwnd, 118), h, TRUE); x += S(hwnd, 126);
-    MoveWindow(state->toLabel, x, y + S(hwnd, 2), S(hwnd, 20), h, TRUE); x += S(hwnd, 26);
-    MoveWindow(state->endDate, x, y, S(hwnd, 118), h, TRUE); x += S(hwnd, 136);
+    int labelWidth = leadingLabelWidth;
+    MoveWindow(state->startLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
+    MoveWindow(state->startDate, x, firstRowY, S(hwnd, 118), h, TRUE); x += S(hwnd, 126);
+    MoveWindow(state->toLabel, x, firstRowY + S(hwnd, 2), S(hwnd, 20), h, TRUE); x += S(hwnd, 26);
+    MoveWindow(state->endDate, x, firstRowY, S(hwnd, 118), h, TRUE); x += S(hwnd, 136);
     labelWidth = search::measure_control_text_width(hwnd, state->campusLabel, 50);
-    MoveWindow(state->campusLabel, x, y + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->campus, x, y, S(hwnd, 82), S(hwnd, 180), TRUE); x += S(hwnd, 96);
-    MoveWindow(state->includePlateletCryo, x, y, S(hwnd, 174), h, TRUE); x += S(hwnd, 180);
+    MoveWindow(state->campusLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
+    MoveWindow(state->campus, x, firstRowY, S(hwnd, 82), S(hwnd, 180), TRUE); x += S(hwnd, 96);
     labelWidth = search::measure_control_text_width(hwnd, state->basisLabel, 70);
-    MoveWindow(state->basisLabel, x, y + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->statisticBasis, x, y, S(hwnd, 112), S(hwnd, 120), TRUE);
-    const int secondY = S(hwnd, 42);
-    x = pad;
-    labelWidth = search::measure_control_text_width(hwnd, state->thresholdLabel, 75);
-    MoveWindow(state->thresholdLabel, x, secondY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->thresholdOperator, x, secondY, S(hwnd, 92), S(hwnd, 120), TRUE); x += S(hwnd, 100);
-    MoveWindow(state->thresholdValue, x, secondY, S(hwnd, 88), h, TRUE); x += S(hwnd, 92);
-    MoveWindow(state->thresholdUnitLabel, x, secondY + S(hwnd, 2), S(hwnd, 28), h, TRUE); x += S(hwnd, 38);
+    MoveWindow(state->basisLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
+    MoveWindow(state->statisticBasis, x, firstRowY, S(hwnd, 112), S(hwnd, 120), TRUE); x += S(hwnd, 120);
     labelWidth = search::measure_control_text_width(hwnd, state->timeSourceLabel, 75);
-    MoveWindow(state->timeSourceLabel, x, secondY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->eventTimeSource, x, secondY, S(hwnd, 116), S(hwnd, 150), TRUE); x += S(hwnd, 124);
-    MoveWindow(state->query, x, secondY - S(hwnd, 1), S(hwnd, 62), S(hwnd, 27), TRUE); x += S(hwnd, 70);
-    MoveWindow(state->exportEvents, x, secondY - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE); x += S(hwnd, 96);
-    MoveWindow(state->exportComponents, x, secondY - S(hwnd, 1), S(hwnd, 104), S(hwnd, 27), TRUE);
+    MoveWindow(state->timeSourceLabel, x, firstRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
+    MoveWindow(state->eventTimeSource, x, firstRowY, S(hwnd, 116), S(hwnd, 150), TRUE);
 
-    MoveWindow(state->status, pad, S(hwnd, 75), width - pad * 2, S(hwnd, 22), TRUE);
-    const int summaryTop = S(hwnd, 101);
-    const int summaryHeight = S(hwnd, 58);
-    MoveWindow(state->summary, pad, summaryTop, width - pad * 2, summaryHeight, TRUE);
+    x = pad;
+    labelWidth = leadingLabelWidth;
+    MoveWindow(state->thresholdLabel, x, secondRowY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
+    MoveWindow(state->thresholdOperator, x, secondRowY, S(hwnd, 92), S(hwnd, 120), TRUE); x += S(hwnd, 100);
+    MoveWindow(state->thresholdValue, x, secondRowY, S(hwnd, 88), h, TRUE); x += S(hwnd, 92);
+    MoveWindow(state->thresholdUnitLabel, x, secondRowY + S(hwnd, 2), S(hwnd, 28), h, TRUE); x += S(hwnd, 38);
+    MoveWindow(state->includePlateletCryo, x, secondRowY, S(hwnd, 174), h, TRUE); x += S(hwnd, 184);
+    MoveWindow(state->query, x, secondRowY - S(hwnd, 1), S(hwnd, 62), S(hwnd, 27), TRUE); x += S(hwnd, 70);
+    MoveWindow(state->exportEvents, x, secondRowY - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE); x += S(hwnd, 96);
+    MoveWindow(state->exportComponents, x, secondRowY - S(hwnd, 1), S(hwnd, 86), S(hwnd, 27), TRUE);
+
+    const int statusTop = filterBottom + S(hwnd, 4);
+    MoveWindow(state->status, pad, statusTop, width - pad * 2, S(hwnd, 22), TRUE);
+    const int summaryTop = statusTop + S(hwnd, 25);
+    const int summaryHeight = S(hwnd, 56);
+    const int cardGap = S(hwnd, 7);
+    const int cardWidth = (width - pad * 2 - cardGap * 5) / 6;
+    for (int index = 0; index < static_cast<int>(state->summaryCards.size()); ++index) {
+        MoveWindow(state->summaryCards[static_cast<size_t>(index)],
+                   pad + index * (cardWidth + cardGap), summaryTop,
+                   cardWidth, summaryHeight, TRUE);
+    }
 
     const int detailControlsTop = height * 62 / 100;
     const int eventsTop = summaryTop + summaryHeight + pad;
     MoveWindow(state->events, pad, eventsTop, width - pad * 2,
                (std::max)(S(hwnd, 130), detailControlsTop - eventsTop - S(hwnd, 34)), TRUE);
-    x = pad;
-    labelWidth = search::measure_control_text_width(hwnd, state->detailLabel, 75);
-    MoveWindow(state->detailLabel, x, detailControlsTop, labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
-    MoveWindow(state->detailMode, x, detailControlsTop - S(hwnd, 1), S(hwnd, 130), S(hwnd, 160), TRUE);
-    MoveWindow(state->components, pad, detailControlsTop + S(hwnd, 30), width - pad * 2,
-               (std::max)(S(hwnd, 90), height - detailControlsTop - S(hwnd, 40)), TRUE);
+    MoveWindow(state->detailMode, pad, detailControlsTop - S(hwnd, 1), S(hwnd, 370), S(hwnd, 28), TRUE);
+    MoveWindow(state->detailContext, pad + S(hwnd, 382), detailControlsTop + S(hwnd, 2),
+               (std::max)(S(hwnd, 200), width - pad * 2 - S(hwnd, 382)), h, TRUE);
+    MoveWindow(state->components, pad, detailControlsTop + S(hwnd, 29), width - pad * 2,
+               (std::max)(S(hwnd, 90), height - detailControlsTop - S(hwnd, 39)), TRUE);
 }
 
 void runQuery(HWND hwnd, State* state) {
@@ -595,7 +729,7 @@ void runQuery(HWND hwnd, State* state) {
     setQueryEnabled(state, false);
     EnableWindow(state->exportEvents, FALSE);
     EnableWindow(state->exportComponents, FALSE);
-    setStatus(state, L"正在查询并计算24小时大量输血事件...");
+    setStatus(state, L"正在查询并计算24小时事件...");
     std::thread([hwnd, query]() {
         auto* result = new QueryResult();
         const auto started = std::chrono::steady_clock::now();
@@ -746,7 +880,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             state = reinterpret_cast<State*>(mcs->lParam);
             SetPropW(hwnd, PROP_STATE, state);
             state->bgBrush = CreateSolidBrush(RGB(0xF0, 0xF0, 0xF0));
-            state->startLabel = makeLabel(hwnd, L"事件日期：");
+            state->filterGroup = CreateWindowExW(
+                0, L"BUTTON", L"查询条件", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+            state->startLabel = makeLabel(hwnd, L"事件日期：", SS_LEFT);
             state->startDate = makeDate(hwnd, IDC_START_DATE);
             state->toLabel = makeLabel(hwnd, L"至", SS_CENTER);
             state->endDate = makeDate(hwnd, IDC_END_DATE);
@@ -765,7 +902,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const wchar_t* statisticBases[] = {L"实际输血量", L"申请量对照"};
             addComboItems(state->statisticBasis, statisticBases,
                           static_cast<int>(std::size(statisticBases)));
-            state->thresholdLabel = makeLabel(hwnd, L"统计阈值：");
+            state->thresholdLabel = makeLabel(hwnd, L"统计阈值：", SS_LEFT);
             state->thresholdOperator = makeCombo(hwnd, IDC_THRESHOLD_OPERATOR);
             const wchar_t* thresholdOperators[] = {L"大于等于", L"大于"};
             addComboItems(state->thresholdOperator, thresholdOperators,
@@ -783,24 +920,27 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             addComboItems(state->eventTimeSource, timeSources, static_cast<int>(std::size(timeSources)));
             EnableWindow(state->eventTimeSource, TRUE);
             state->query = search::create_button(hwnd, IDC_QUERY, L"查询", 0, 0, 0, 0);
+            SendMessageW(state->query, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
             state->exportEvents = search::create_button(hwnd, IDC_EXPORT_EVENTS, L"导出事件", 0, 0, 0, 0);
-            state->exportComponents = search::create_button(hwnd, IDC_EXPORT_COMPONENTS, L"导出成分明细", 0, 0, 0, 0);
+            state->exportComponents = search::create_button(hwnd, IDC_EXPORT_COMPONENTS, L"导出明细", 0, 0, 0, 0);
             EnableWindow(state->exportEvents, FALSE);
             EnableWindow(state->exportComponents, FALSE);
             state->status = makeLabel(
                 hwnd,
-                L"请选择事件日期后查询。默认按实际输血量和配血时间统计；申请量可作为对照。",
-                SS_LEFT);
-            state->summary = makeList(hwnd, IDC_SUMMARY);
-            initList(state->summary, SUMMARY_COLUMNS, static_cast<int>(std::size(SUMMARY_COLUMNS)));
+                L"请选择日期和统计口径后查询。",
+                SS_LEFT | SS_ENDELLIPSIS);
+            for (auto& card : state->summaryCards) card = makeSummaryCard(hwnd);
             state->events = makeList(hwnd, IDC_EVENTS);
             initList(state->events, EVENT_COLUMNS, EVENT_COLUMN_COUNT);
-            state->detailLabel = makeLabel(hwnd, L"成分明细：");
-            state->detailMode = makeCombo(hwnd, IDC_DETAIL_MODE);
-            const wchar_t* detailModes[] = {L"当前事件", L"全部事件成分", L"异常核查"};
-            addComboItems(state->detailMode, detailModes, static_cast<int>(std::size(detailModes)));
+            state->detailMode = makeTab(hwnd, IDC_DETAIL_MODE);
+            addTab(state->detailMode, 0, L"当前事件血袋");
+            addTab(state->detailMode, 1, L"全部血袋");
+            addTab(state->detailMode, 2, L"异常核查");
+            TabCtrl_SetCurSel(state->detailMode, 0);
+            state->detailContext = makeLabel(hwnd, L"请选择一个事件查看明细。", SS_LEFT);
             state->components = makeList(hwnd, IDC_COMPONENTS);
             initList(state->components, COMPONENT_COLUMNS, COMPONENT_COLUMN_COUNT);
+            applyDefaultColumnLayout(state, true);
             search::apply_font_to_children(hwnd, state->ctx.uiFont);
             populateSummary(state);
             resizeLayout(hwnd, state);
@@ -814,27 +954,34 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (LOWORD(wp) == IDC_QUERY) { runQuery(hwnd, state); return 0; }
             if (LOWORD(wp) == IDC_EXPORT_EVENTS) { exportEventCsv(hwnd, state); return 0; }
             if (LOWORD(wp) == IDC_EXPORT_COMPONENTS) { exportComponentCsv(hwnd, state); return 0; }
-            if (LOWORD(wp) == IDC_DETAIL_MODE && HIWORD(wp) == CBN_SELCHANGE) {
-                refreshComponentScope(state);
-                return 0;
-            }
             if (LOWORD(wp) == IDC_STATISTIC_BASIS && HIWORD(wp) == CBN_SELCHANGE) {
-                EnableWindow(state->eventTimeSource,
-                    SendMessageW(state->statisticBasis, CB_GETCURSEL, 0, 0) == 0);
+                const bool actual = SendMessageW(state->statisticBasis, CB_GETCURSEL, 0, 0) == 0;
+                EnableWindow(state->eventTimeSource, actual);
+                SendMessageW(state->eventTimeSource, CB_SETCURSEL, actual ? 0 : 2, 0);
                 return 0;
             }
             break;
         case WM_NOTIFY: {
             if (!state) break;
             auto* header = reinterpret_cast<NMHDR*>(lp);
+            if (header->idFrom == IDC_DETAIL_MODE && header->code == TCN_SELCHANGE) {
+                refreshComponentScope(state);
+                return 0;
+            }
             if (header->idFrom == IDC_EVENTS && header->code == LVN_COLUMNCLICK) {
                 const auto* info = reinterpret_cast<NMLISTVIEW*>(lp);
                 sortEvents(state, info->iSubItem, true);
                 populateEvents(state);
+                if (!state->eventRows.empty()) {
+                    ListView_SetItemState(
+                        state->events, 0, LVIS_SELECTED | LVIS_FOCUSED,
+                        LVIS_SELECTED | LVIS_FOCUSED);
+                }
                 refreshComponentScope(state);
                 return 0;
             }
-            if (header->idFrom == IDC_EVENTS && header->code == LVN_ITEMCHANGED && comboText(state->detailMode) == L"当前事件") {
+            if (header->idFrom == IDC_EVENTS && header->code == LVN_ITEMCHANGED &&
+                TabCtrl_GetCurSel(state->detailMode) == 0) {
                 refreshComponentScope(state);
                 return 0;
             }
@@ -906,7 +1053,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             state->loadedThresholdInclusive = result->thresholdInclusive;
             state->loadedStatisticBasis = result->statisticBasis;
             state->loadedEventTimeSource = result->eventTimeSource;
-            setEventCompositionColumnTitle(state, state->loadedStatisticBasis == "actual");
+            const bool actual = state->loadedStatisticBasis == "actual";
+            setEventCompositionColumnTitle(state, actual);
+            updateDetailTabTitles(state, actual);
+            applyDefaultColumnLayout(state, actual);
             state->hasResult = true;
             state->eventSortColumn = EVENT_FIRST_TIME;
             state->eventSortAscending = false;
@@ -925,18 +1075,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const std::wstring timeText = state->loadedEventTimeSource == "out" ? L"出库时间" :
                 state->loadedEventTimeSource == "apply" ? L"申请时间" :
                 state->loadedEventTimeSource == "check" ? L"血库审核时间" : L"配血时间";
-            setStatus(state, L"查询完成：" + basisText + L"口径，大量输血事件 " + std::to_wstring(state->totals.event_count) +
-                             L" 个，原始记录 " + std::to_wstring(state->totals.raw_record_count) +
-                             L" 条，耗时 " + std::to_wstring(result->elapsedMs) + L" ms，" +
-                             L"异常事件 " + std::to_wstring(state->totals.issue_event_count) +
-                             L" 个，核查记录 " + std::to_wstring(state->totals.audit_record_count) +
-                             L" 条。事件时间：" + timeText + L"。院区：" + state->loadedCampus +
-                             (state->loadedIncludePlateletCryo
-                                  ? L"。已包括血小板和冷沉淀，规则 "
-                                  : L"。未包括血小板和冷沉淀，规则 ") +
-                             RULE_VERSION_W + L"。" +
-                             L"统计条件 " + search::utf8_to_wide(thresholdCondition(
-                                 state->loadedThresholdMl, state->loadedThresholdInclusive)) + L"。");
+            setStatus(state, L"查询完成 · " + basisText + L" / " + timeText + L" / " +
+                             state->loadedCampus + L" · 事件 " +
+                             std::to_wstring(state->totals.event_count) + L"，异常 " +
+                             std::to_wstring(state->totals.issue_event_count) + L"，核查 " +
+                             std::to_wstring(state->totals.audit_record_count) + L" · " +
+                             std::to_wstring(state->totals.raw_record_count) + L" 条，" +
+                             std::to_wstring(result->elapsedMs) + L" ms");
             return 0;
         }
         case app::WM_APP_SETTINGS_CHANGED:
