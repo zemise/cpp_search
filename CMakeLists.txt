@@ -177,6 +177,7 @@ add_executable(main_app WIN32
     src/regular_report_picture.cpp
     src/specimen_sign_module.cpp
     src/settings_module.cpp
+    src/transfusion_order_statistics_module.cpp
     src/search_splitter.cpp
     src/tinflate.cpp
     src/crash_handler.cpp
@@ -222,6 +223,17 @@ if(MINGW)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(transfusion_order_core_tests
+        tests/transfusion_order_statistics_test.cpp
+        src/search_core.cpp
+        src/search_text.cpp
+    )
+    target_include_directories(transfusion_order_core_tests PRIVATE src)
+    if(WIN32)
+        target_link_libraries(transfusion_order_core_tests PRIVATE odbc32)
+    endif()
+    add_test(NAME transfusion_order_core_tests COMMAND transfusion_order_core_tests)
+
     add_executable(massive_transfusion_core_tests
         tests/massive_transfusion_statistics_test.cpp
     )

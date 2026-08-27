@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -3566,6 +3567,220 @@ bool query_backup_blood_statistics(const BackupBloodStatQuery& query,
 #endif
 }
 
+namespace {
+
+std::string transfusion_order_status(const std::string& status, bool deleted) {
+    if (deleted || trim(status) == "已删除") return "已删除";
+    const std::string value = trim(status);
+    if (value == "已驳回" || value == "未审核" || value == "已审核" || value == "已完结") {
+        return value;
+    }
+    return "其他状态";
+}
+
+int transfusion_order_status_priority(const std::string& status) {
+    if (status == "已删除") return 6;
+    if (status == "已驳回") return 5;
+    if (status == "已完结") return 4;
+    if (status == "已审核") return 3;
+    if (status == "未审核") return 2;
+    return 1;
+}
+
+}  // namespace
+
+bool build_transfusion_order_statistics(
+    const TransfusionOrderStatQuery& query,
+    const std::vector<TransfusionOrderStatRawRow>& raw_rows,
+    TransfusionOrderStatSummary& summary,
+    std::vector<TransfusionOrderStatDetailRow>& rows,
+    std::string& error) {
+    summary = TransfusionOrderStatSummary{};
+    rows.clear();
+
+    const std::string requested_campus = trim(query.campus);
+    const auto campus_for_dept = [](const std::string& apply_dept) {
+        return contains_text(apply_dept, "滨水") ? std::string("新院") : std::string("老院");
+    };
+    const auto campus_matches = [&requested_campus](const std::string& campus) {
+        return (requested_campus != "老院" && requested_campus != "新院") ||
+               campus == requested_campus;
+    };
+
+    struct Aggregate {
+        TransfusionOrderStatDetailRow row;
+        std::set<std::string> statuses;
+        std::set<std::string> patient_nos;
+    };
+    std::map<std::string, Aggregate> grouped;
+
+    const auto fill_if_blank = [](std::string& target, const std::string& value) {
+        if (trim(target).empty() && !trim(value).empty()) target = value;
+    };
+
+    for (const auto& raw : raw_rows) {
+        const std::string apply_form_no = trim(raw.apply_form_no);
+        if (apply_form_no.empty()) {
+            if (campus_matches(campus_for_dept(raw.apply_dept))) {
+                ++summary.missing_apply_form_no_count;
+            }
+            continue;
+        }
+
+        const std::string status = transfusion_order_status(raw.apply_status, raw.delete_bit);
+        auto found = grouped.find(apply_form_no);
+        if (found == grouped.end()) {
+            Aggregate aggregate;
+            aggregate.row.apply_form_no = apply_form_no;
+            aggregate.row.apply_time = raw.apply_time;
+            aggregate.row.apply_status = status;
+            aggregate.row.patient_no = raw.patient_no;
+            aggregate.row.patient_no_type = raw.patient_no_type;
+            aggregate.row.patient_name = raw.patient_name;
+            aggregate.row.apply_dept = raw.apply_dept;
+            aggregate.row.apply_dept_id = raw.apply_dept_id;
+            aggregate.row.bed_no = raw.bed_no;
+            aggregate.row.apply_doctor = raw.apply_doctor;
+            aggregate.row.tran_property = raw.tran_property;
+            aggregate.row.delete_bit = raw.delete_bit || status == "已删除";
+            aggregate.statuses.insert(status);
+            if (!trim(raw.patient_no).empty()) aggregate.patient_nos.insert(trim(raw.patient_no));
+            grouped.emplace(apply_form_no, std::move(aggregate));
+            continue;
+        }
+
+        auto& aggregate = found->second;
+        auto& row = aggregate.row;
+        aggregate.statuses.insert(status);
+        if (!trim(raw.patient_no).empty()) aggregate.patient_nos.insert(trim(raw.patient_no));
+        if (transfusion_order_status_priority(status) >
+            transfusion_order_status_priority(row.apply_status)) {
+            row.apply_status = status;
+        }
+        row.delete_bit = row.delete_bit || raw.delete_bit || status == "已删除";
+        if (raw.apply_time > row.apply_time) row.apply_time = raw.apply_time;
+        fill_if_blank(row.patient_no, raw.patient_no);
+        fill_if_blank(row.patient_no_type, raw.patient_no_type);
+        fill_if_blank(row.patient_name, raw.patient_name);
+        fill_if_blank(row.apply_dept, raw.apply_dept);
+        fill_if_blank(row.apply_dept_id, raw.apply_dept_id);
+        fill_if_blank(row.bed_no, raw.bed_no);
+        fill_if_blank(row.apply_doctor, raw.apply_doctor);
+        fill_if_blank(row.tran_property, raw.tran_property);
+    }
+
+    for (auto& entry : grouped) {
+        auto& aggregate = entry.second;
+        auto& row = aggregate.row;
+        row.campus = campus_for_dept(row.apply_dept);
+        if (!campus_matches(row.campus)) continue;
+
+        const bool status_conflict = aggregate.statuses.size() > 1;
+        const bool patient_conflict = aggregate.patient_nos.size() > 1;
+        const bool missing_dept = trim(row.apply_dept).empty();
+        const std::string status = transfusion_order_status(row.apply_status, row.delete_bit);
+
+        if (status == "其他状态") {
+            ++summary.other_status_count;
+            continue;
+        }
+        if (status == "已驳回" && !query.include_rejected) continue;
+        if (status == "已删除" && !query.include_deleted) continue;
+
+        const auto append_data_status = [&row](const char* value) {
+            if (!row.data_status.empty()) row.data_status += "/";
+            row.data_status += value;
+        };
+        if (status_conflict) append_data_status("状态冲突");
+        if (patient_conflict) append_data_status("病人号冲突");
+        if (missing_dept) append_data_status("申请科室为空");
+        if (row.data_status.empty()) row.data_status = "正常";
+        if (status_conflict) ++summary.conflict_count;
+
+        row.apply_status = status;
+        ++summary.total_count;
+        if (status == "未审核") ++summary.unreviewed_count;
+        else if (status == "已审核") ++summary.reviewed_count;
+        else if (status == "已完结") ++summary.completed_count;
+        else if (status == "已驳回") ++summary.rejected_count;
+        else if (status == "已删除") ++summary.deleted_count;
+        rows.push_back(std::move(row));
+    }
+
+    std::stable_sort(rows.begin(), rows.end(), [](const auto& left, const auto& right) {
+        if (left.apply_time != right.apply_time) return left.apply_time > right.apply_time;
+        return left.apply_form_no < right.apply_form_no;
+    });
+    error.clear();
+    return true;
+}
+
+bool query_transfusion_order_statistics(
+    const TransfusionOrderStatQuery& query,
+    TransfusionOrderStatSummary& summary,
+    std::vector<TransfusionOrderStatDetailRow>& rows,
+    std::string& error, LogFn log) {
+    summary = TransfusionOrderStatSummary{};
+    rows.clear();
+#ifndef _WIN32
+    (void)query;
+    (void)log;
+    error = "query_transfusion_order_statistics is only available on Windows";
+    return false;
+#else
+    const std::string start_date = trim(query.start_date);
+    const std::string end_date = trim(query.end_date);
+    if (start_date.size() != 10 || end_date.size() != 10 || start_date > end_date) {
+        error = "valid start_date and end_date are required";
+        return false;
+    }
+    DbContext db;
+    if (!connect(query.connection_string, db, error, log)) return false;
+
+    std::ostringstream sql;
+    sql << "SELECT "
+        << "isnull(LTRIM(RTRIM(a.ApplyFormNO)),''),"
+        << "isnull(CONVERT(varchar(19),a.Apply_Time,120),''),"
+        << "isnull(LTRIM(RTRIM(a.ApplyForm_Statue)),''),"
+        << "isnull(LTRIM(RTRIM(a.Patient_NO)),''),"
+        << "isnull(LTRIM(RTRIM(a.Patient_NOType)),''),"
+        << "isnull(LTRIM(RTRIM(a.Patient_Name)),''),"
+        << "isnull(LTRIM(RTRIM(a.Apply_Dept)),''),"
+        << "isnull(CONVERT(varchar(32),a.Apply_DeptID),''),"
+        << "isnull(LTRIM(RTRIM(a.Apply_BedNo)),''),"
+        << "isnull(LTRIM(RTRIM(a.Apply_Doctor)),''),"
+        << "isnull(LTRIM(RTRIM(a.TranProperty)),''),"
+        << "CASE WHEN isnull(a.Delete_Bit,0)=1 THEN '1' ELSE '0' END"
+        << " FROM LS_XK_BloodRequestApply a WITH (NOLOCK)"
+        << " WHERE a.Apply_Time>='" << sql_escape(start_date) << "'"
+        << " AND a.Apply_Time<DATEADD(day,1,'" << sql_escape(end_date) << "')"
+        << " ORDER BY a.Apply_Time DESC,a.ApplyFormNO";
+    if (log) log("exec sql: " + sql.str() + "\n");
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!exec_query(db.dbc, sql.str(), stmt, error)) return false;
+    std::vector<TransfusionOrderStatRawRow> raw_rows;
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        TransfusionOrderStatRawRow row;
+        row.apply_form_no = fetch_column(stmt, 1);
+        row.apply_time = fetch_column(stmt, 2);
+        row.apply_status = fetch_column(stmt, 3);
+        row.patient_no = fetch_column(stmt, 4);
+        row.patient_no_type = fetch_column(stmt, 5);
+        row.patient_name = fetch_column(stmt, 6);
+        row.apply_dept = fetch_column(stmt, 7);
+        row.apply_dept_id = fetch_column(stmt, 8);
+        row.bed_no = fetch_column(stmt, 9);
+        row.apply_doctor = fetch_column(stmt, 10);
+        row.tran_property = fetch_column(stmt, 11);
+        row.delete_bit = trim(fetch_column(stmt, 12)) == "1";
+        raw_rows.push_back(std::move(row));
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    return build_transfusion_order_statistics(query, raw_rows, summary, rows, error);
+#endif
+}
+
 bool build_massive_transfusion_statistics(
     const MassiveTransfusionStatQuery& query,
     const std::vector<MassiveTransfusionRawRow>& raw_rows,
@@ -3581,6 +3796,10 @@ bool build_massive_transfusion_statistics(
     const std::string end_date = trim(query.end_date);
     if (start_date.size() != 10 || end_date.size() != 10 || start_date > end_date) {
         error = "valid start_date and end_date are required";
+        return false;
+    }
+    if (!std::isfinite(query.threshold_ml) || query.threshold_ml <= 0.0) {
+        error = "threshold_ml must be a positive finite number";
         return false;
     }
 
@@ -3843,7 +4062,9 @@ bool build_massive_transfusion_statistics(
                 }
             }
             event.total_ml = format_number(total_ml);
-            event.qualifies = total_ml >= 1600.0;
+            event.qualifies = query.threshold_inclusive
+                ? total_ml >= query.threshold_ml
+                : total_ml > query.threshold_ml;
             for (const auto& status : statuses) {
                 if (!event.status_summary.empty()) event.status_summary += "/";
                 event.status_summary += status;
@@ -3953,6 +4174,10 @@ bool query_massive_transfusion_statistics(
     const std::string end_date = trim(query.end_date);
     if (start_date.size() != 10 || end_date.size() != 10 || start_date > end_date) {
         error = "valid start_date and end_date are required";
+        return false;
+    }
+    if (!std::isfinite(query.threshold_ml) || query.threshold_ml <= 0.0) {
+        error = "threshold_ml must be a positive finite number";
         return false;
     }
     DbContext db;

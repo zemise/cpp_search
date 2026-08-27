@@ -507,12 +507,67 @@ struct BackupBloodStatDetailRow {
     bool apply_purpose_match = false;
 };
 
+struct TransfusionOrderStatQuery {
+    std::string connection_string;
+    std::string start_date;
+    std::string end_date;
+    std::string campus;  // 全部/老院/新院，C++ 内存派生后过滤
+    bool include_rejected = false;
+    bool include_deleted = false;
+};
+
+struct TransfusionOrderStatRawRow {
+    std::string apply_form_no;
+    std::string apply_time;
+    std::string apply_status;
+    std::string patient_no;
+    std::string patient_no_type;
+    std::string patient_name;
+    std::string apply_dept;
+    std::string apply_dept_id;
+    std::string bed_no;
+    std::string apply_doctor;
+    std::string tran_property;
+    bool delete_bit = false;
+};
+
+struct TransfusionOrderStatDetailRow {
+    std::string campus;
+    std::string apply_form_no;
+    std::string apply_time;
+    std::string apply_status;
+    std::string patient_no;
+    std::string patient_no_type;
+    std::string patient_name;
+    std::string apply_dept;
+    std::string apply_dept_id;
+    std::string bed_no;
+    std::string apply_doctor;
+    std::string tran_property;
+    std::string data_status;
+    bool delete_bit = false;
+};
+
+struct TransfusionOrderStatSummary {
+    int total_count = 0;
+    int unreviewed_count = 0;
+    int reviewed_count = 0;
+    int completed_count = 0;
+    int rejected_count = 0;
+    int deleted_count = 0;
+    int other_status_count = 0;
+    int missing_apply_form_no_count = 0;
+    int conflict_count = 0;
+};
+
 struct MassiveTransfusionStatQuery {
     std::string connection_string;
     std::string start_date;
     std::string end_date;
     std::string campus;  // 全部/老院/新院，按事件首张有效申请的申请科室派生
     bool include_platelet_and_cryoprecipitate = false;
+    double threshold_ml = 1600.0;
+    bool threshold_inclusive = true;  // true: >= threshold_ml, false: > threshold_ml
 };
 
 struct MassiveTransfusionRawRow {
@@ -701,6 +756,15 @@ bool query_specimen_signed_list(const SpecimenSignedListQuery& query, std::vecto
 bool query_hiv_statistics(const HivStatQuery& query, HivStatSummary& summary, std::vector<HivStatDetailRow>& rows, std::string& error, LogFn log = {});
 bool query_emergency_statistics(const EmergencyStatQuery& query, EmergencyStatSummary& summary, std::vector<EmergencyStatDetailRow>& rows, std::string& error, LogFn log = {});
 bool query_backup_blood_statistics(const BackupBloodStatQuery& query, BackupBloodStatSummary& summary, std::vector<BackupBloodStatDetailRow>& rows, std::string& error, LogFn log = {});
+bool build_transfusion_order_statistics(const TransfusionOrderStatQuery& query,
+                                        const std::vector<TransfusionOrderStatRawRow>& raw_rows,
+                                        TransfusionOrderStatSummary& summary,
+                                        std::vector<TransfusionOrderStatDetailRow>& rows,
+                                        std::string& error);
+bool query_transfusion_order_statistics(const TransfusionOrderStatQuery& query,
+                                        TransfusionOrderStatSummary& summary,
+                                        std::vector<TransfusionOrderStatDetailRow>& rows,
+                                        std::string& error, LogFn log = {});
 bool build_massive_transfusion_statistics(const MassiveTransfusionStatQuery& query,
                                           const std::vector<MassiveTransfusionRawRow>& raw_rows,
                                           MassiveTransfusionStatSummary& summary,

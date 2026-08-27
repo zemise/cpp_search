@@ -15,7 +15,10 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <set>
 #include <string>
@@ -44,6 +47,8 @@ enum ControlId {
     IDC_STATUS,
     IDC_DETAIL_MODE,
     IDC_INCLUDE_PLATELET_CRYO,
+    IDC_THRESHOLD_VALUE,
+    IDC_THRESHOLD_OPERATOR,
 };
 
 struct Column { const wchar_t* title; int width; };
@@ -128,11 +133,15 @@ struct State {
     HWND startLabel = nullptr;
     HWND toLabel = nullptr;
     HWND campusLabel = nullptr;
+    HWND thresholdLabel = nullptr;
+    HWND thresholdUnitLabel = nullptr;
     HWND detailLabel = nullptr;
     HWND startDate = nullptr;
     HWND endDate = nullptr;
     HWND campus = nullptr;
     HWND includePlateletCryo = nullptr;
+    HWND thresholdValue = nullptr;
+    HWND thresholdOperator = nullptr;
     HWND detailMode = nullptr;
     HWND query = nullptr;
     HWND exportEvents = nullptr;
@@ -148,6 +157,8 @@ struct State {
     std::string loadedEnd;
     std::wstring loadedCampus = L"全部";
     bool loadedIncludePlateletCryo = false;
+    double loadedThresholdMl = 1600.0;
+    bool loadedThresholdInclusive = true;
     int eventSortColumn = EVENT_FIRST_TIME;
     bool eventSortAscending = false;
     Summary totals;
@@ -162,6 +173,8 @@ struct QueryResult {
     std::string endDate;
     std::string campus;
     bool includePlateletCryo = false;
+    double thresholdMl = 1600.0;
+    bool thresholdInclusive = true;
     std::string error;
     Summary summary;
     std::vector<EventRow> events;
@@ -224,6 +237,35 @@ std::wstring comboText(HWND combo) {
     return text;
 }
 
+std::wstring windowText(HWND control) {
+    const int length = GetWindowTextLengthW(control);
+    std::wstring value(static_cast<size_t>(length + 1), L'\0');
+    if (length > 0) GetWindowTextW(control, value.data(), length + 1);
+    value.resize(static_cast<size_t>(length));
+    return value;
+}
+
+bool parseThreshold(HWND control, double& value) {
+    const std::string input = search::trim(search::wide_to_utf8(windowText(control)));
+    if (input.empty()) return false;
+    bool saw_digit = false;
+    bool saw_dot = false;
+    int decimal_places = 0;
+    for (char ch : input) {
+        if (ch == '.' && !saw_dot) {
+            saw_dot = true;
+            continue;
+        }
+        if (!std::isdigit(static_cast<unsigned char>(ch))) return false;
+        saw_digit = true;
+        if (saw_dot && ++decimal_places > 2) return false;
+    }
+    if (!saw_digit) return false;
+    char* end = nullptr;
+    value = std::strtod(input.c_str(), &end);
+    return end && *end == '\0' && std::isfinite(value) && value > 0.0;
+}
+
 std::string dateText(HWND picker) {
     SYSTEMTIME value{};
     if (DateTime_GetSystemtime(picker, &value) != GDT_VALID) return {};
@@ -261,6 +303,10 @@ std::string numberText(double value) {
     while (!text.empty() && text.back() == '0') text.pop_back();
     if (!text.empty() && text.back() == '.') text.pop_back();
     return text;
+}
+
+std::string thresholdCondition(double threshold_ml, bool inclusive) {
+    return std::string(inclusive ? ">=" : ">") + numberText(threshold_ml) + "ml";
 }
 
 std::string eventCell(const EventRow& row, int column) {
@@ -391,6 +437,8 @@ void setQueryEnabled(State* state, bool enabled) {
     EnableWindow(state->endDate, enabled);
     EnableWindow(state->campus, enabled);
     EnableWindow(state->includePlateletCryo, enabled);
+    EnableWindow(state->thresholdValue, enabled);
+    EnableWindow(state->thresholdOperator, enabled);
     EnableWindow(state->query, enabled);
 }
 
@@ -413,12 +461,19 @@ void resizeLayout(HWND hwnd, State* state) {
     MoveWindow(state->campusLabel, x, y + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
     MoveWindow(state->campus, x, y, S(hwnd, 82), S(hwnd, 180), TRUE); x += S(hwnd, 96);
     MoveWindow(state->includePlateletCryo, x, y, S(hwnd, 174), h, TRUE); x += S(hwnd, 180);
-    MoveWindow(state->query, x, y - S(hwnd, 1), S(hwnd, 62), S(hwnd, 27), TRUE); x += S(hwnd, 70);
-    MoveWindow(state->exportEvents, x, y - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE); x += S(hwnd, 96);
-    MoveWindow(state->exportComponents, x, y - S(hwnd, 1), S(hwnd, 104), S(hwnd, 27), TRUE);
+    const int secondY = S(hwnd, 42);
+    x = pad;
+    labelWidth = search::measure_control_text_width(hwnd, state->thresholdLabel, 75);
+    MoveWindow(state->thresholdLabel, x, secondY + S(hwnd, 2), labelWidth, h, TRUE); x += labelWidth + S(hwnd, 5);
+    MoveWindow(state->thresholdOperator, x, secondY, S(hwnd, 92), S(hwnd, 120), TRUE); x += S(hwnd, 100);
+    MoveWindow(state->thresholdValue, x, secondY, S(hwnd, 88), h, TRUE); x += S(hwnd, 92);
+    MoveWindow(state->thresholdUnitLabel, x, secondY + S(hwnd, 2), S(hwnd, 28), h, TRUE); x += S(hwnd, 38);
+    MoveWindow(state->query, x, secondY - S(hwnd, 1), S(hwnd, 62), S(hwnd, 27), TRUE); x += S(hwnd, 70);
+    MoveWindow(state->exportEvents, x, secondY - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE); x += S(hwnd, 96);
+    MoveWindow(state->exportComponents, x, secondY - S(hwnd, 1), S(hwnd, 104), S(hwnd, 27), TRUE);
 
-    MoveWindow(state->status, pad, S(hwnd, 42), width - pad * 2, S(hwnd, 22), TRUE);
-    const int summaryTop = S(hwnd, 68);
+    MoveWindow(state->status, pad, S(hwnd, 75), width - pad * 2, S(hwnd, 22), TRUE);
+    const int summaryTop = S(hwnd, 101);
     const int summaryHeight = S(hwnd, 58);
     MoveWindow(state->summary, pad, summaryTop, width - pad * 2, summaryHeight, TRUE);
 
@@ -448,8 +503,15 @@ void runQuery(HWND hwnd, State* state) {
     query.campus = search::wide_to_utf8(comboText(state->campus));
     query.include_platelet_and_cryoprecipitate =
         SendMessageW(state->includePlateletCryo, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    query.threshold_inclusive = SendMessageW(state->thresholdOperator, CB_GETCURSEL, 0, 0) != 1;
     if (query.start_date.empty() || query.end_date.empty() || query.start_date > query.end_date) {
         MessageBoxW(hwnd, L"首次申请开始日期不能晚于结束日期。", WINDOW_TITLE, MB_ICONWARNING);
+        return;
+    }
+    if (!parseThreshold(state->thresholdValue, query.threshold_ml)) {
+        MessageBoxW(hwnd, L"统计阈值必须是大于 0 且最多保留两位小数的数值。",
+                    WINDOW_TITLE, MB_ICONWARNING);
+        SetFocus(state->thresholdValue);
         return;
     }
     state->querying = true;
@@ -463,6 +525,8 @@ void runQuery(HWND hwnd, State* state) {
         result->endDate = query.end_date;
         result->campus = query.campus;
         result->includePlateletCryo = query.include_platelet_and_cryoprecipitate;
+        result->thresholdMl = query.threshold_ml;
+        result->thresholdInclusive = query.threshold_inclusive;
         result->ok = search::query_massive_transfusion_statistics(
             query, result->summary, result->events, result->orphanRejected, result->error);
         if (!PostMessageW(hwnd, WM_QUERY_LOADED, 0, reinterpret_cast<LPARAM>(result))) delete result;
@@ -512,7 +576,8 @@ std::wstring defaultName(State* state, const wchar_t* suffix) {
 }
 
 std::string exportMetadata(State* state) {
-    return std::string(",>=1600ml,") +
+    return "," + thresholdCondition(state->loadedThresholdMl,
+                                     state->loadedThresholdInclusive) + "," +
            (state->loadedIncludePlateletCryo ? "是," : "否,") + RULE_VERSION + "\n";
 }
 
@@ -528,7 +593,7 @@ void exportEventCsv(HWND hwnd, State* state) {
         if (col) csv.push_back(',');
         csv += csvEscape(search::wide_to_utf8(EVENT_COLUMNS[col].title));
     }
-    csv += ",统计阈值,包括血小板和冷沉淀,折算规则版本\n";
+    csv += ",统计条件,包括血小板和冷沉淀,折算规则版本\n";
     for (const auto& row : state->eventRows) {
         for (int col = 0; col < EVENT_COLUMN_COUNT; ++col) {
             if (col) csv.push_back(',');
@@ -559,7 +624,7 @@ void exportComponentCsv(HWND hwnd, State* state) {
         if (col) csv.push_back(',');
         csv += csvEscape(search::wide_to_utf8(COMPONENT_COLUMNS[col].title));
     }
-    csv += ",统计阈值,包括血小板和冷沉淀,折算规则版本\n";
+    csv += ",统计条件,包括血小板和冷沉淀,折算规则版本\n";
     for (const auto& row : rows) {
         for (int col = 0; col < COMPONENT_COLUMN_COUNT; ++col) {
             if (col) csv.push_back(',');
@@ -607,6 +672,18 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 0, 0, 0, 0, hwnd, win32_control_id(IDC_INCLUDE_PLATELET_CRYO),
                 GetModuleHandleW(nullptr), nullptr);
+            state->thresholdLabel = makeLabel(hwnd, L"统计阈值：");
+            state->thresholdOperator = makeCombo(hwnd, IDC_THRESHOLD_OPERATOR);
+            const wchar_t* thresholdOperators[] = {L"大于等于", L"大于"};
+            addComboItems(state->thresholdOperator, thresholdOperators,
+                          static_cast<int>(std::size(thresholdOperators)));
+            state->thresholdValue = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"1600",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_RIGHT,
+                0, 0, 0, 0, hwnd, win32_control_id(IDC_THRESHOLD_VALUE),
+                GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(state->thresholdValue, EM_SETLIMITTEXT, 18, 0);
+            state->thresholdUnitLabel = makeLabel(hwnd, L"ml", SS_LEFT);
             state->query = search::create_button(hwnd, IDC_QUERY, L"查询", 0, 0, 0, 0);
             state->exportEvents = search::create_button(hwnd, IDC_EXPORT_EVENTS, L"导出事件", 0, 0, 0, 0);
             state->exportComponents = search::create_button(hwnd, IDC_EXPORT_COMPONENTS, L"导出成分明细", 0, 0, 0, 0);
@@ -614,7 +691,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             EnableWindow(state->exportComponents, FALSE);
             state->status = makeLabel(
                 hwnd,
-                L"请选择首次申请日期后查询。默认不包括血小板和冷沉淀，固定阈值 >=1600ml。",
+                L"请选择首次申请日期后查询。默认口径：不包括血小板和冷沉淀，折算总量 >=1600ml。",
                 SS_LEFT);
             state->summary = makeList(hwnd, IDC_SUMMARY);
             initList(state->summary, SUMMARY_COLUMNS, static_cast<int>(std::size(SUMMARY_COLUMNS)));
@@ -721,6 +798,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             state->loadedEnd = result->endDate;
             state->loadedCampus = search::utf8_to_wide(result->campus.empty() ? "全部" : result->campus);
             state->loadedIncludePlateletCryo = result->includePlateletCryo;
+            state->loadedThresholdMl = result->thresholdMl;
+            state->loadedThresholdInclusive = result->thresholdInclusive;
             state->hasResult = true;
             state->eventSortColumn = EVENT_FIRST_TIME;
             state->eventSortAscending = false;
@@ -742,7 +821,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                   ? L"。已包括血小板和冷沉淀，规则 "
                                   : L"。未包括血小板和冷沉淀，规则 ") +
                              RULE_VERSION_W + L"。" +
-                             L"固定阈值 >=1600ml。");
+                             L"统计条件 " + search::utf8_to_wide(thresholdCondition(
+                                 state->loadedThresholdMl, state->loadedThresholdInclusive)) + L"。");
             return 0;
         }
         case app::WM_APP_SETTINGS_CHANGED:

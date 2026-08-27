@@ -2,6 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#ifndef _WIN32
+#include <codecvt>
+#include <locale>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -22,6 +26,7 @@ std::string wide_to_utf8(const std::wstring& text) {
         return {};
     }
 
+#ifdef _WIN32
     const int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
     if (size <= 0) {
         return {};
@@ -32,6 +37,9 @@ std::string wide_to_utf8(const std::wstring& text) {
         out.pop_back();
     }
     return out;
+#else
+    return std::wstring_convert<std::codecvt_utf8<wchar_t>>{}.to_bytes(text);
+#endif
 }
 
 // Qt migration: replace with QString::fromUtf8(text).toStdWString()
@@ -40,6 +48,7 @@ std::wstring utf8_to_wide(const std::string& text) {
         return {};
     }
 
+#ifdef _WIN32
     const int size = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
     if (size <= 0) {
         return {};
@@ -50,6 +59,9 @@ std::wstring utf8_to_wide(const std::string& text) {
         out.pop_back();
     }
     return out;
+#else
+    return std::wstring_convert<std::codecvt_utf8<wchar_t>>{}.from_bytes(text);
+#endif
 }
 
 }  // namespace search

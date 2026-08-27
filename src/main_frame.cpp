@@ -38,6 +38,7 @@
 #include "regular_report_module.h"
 #include "settings_module.h"
 #include "specimen_sign_module.h"
+#include "transfusion_order_statistics_module.h"
 #include "update_config.h"
 #include "update_source.h"
 #include "version.h"
@@ -69,6 +70,7 @@ constexpr int IDM_STAT2        = 3022;
 constexpr int IDM_STAT3        = 3023;
 constexpr int IDM_STAT4        = 3024;
 constexpr int IDM_STAT5        = 3025;
+constexpr int IDM_STAT6        = 3026;
 constexpr int ID_STATUS        = 4001;
 constexpr int ID_TIMER         = 5001;
 constexpr int ID_AUTO_UPDATE_TIMER = 5002;
@@ -276,6 +278,7 @@ const ModuleDef g_modules[] = {
     { L"ImmuneDuplicateStatistics", L"统计分析管理", L"免疫重复项目统计(&3)", IDM_STAT3, create_immune_duplicate_statistics_module },
     { L"BackupBloodStatistics", L"统计分析管理", L"备血统计(&4)", IDM_STAT4, create_backup_blood_statistics_module },
     { L"MassiveTransfusionStatistics", L"统计分析管理", L"大量输血统计(&5)", IDM_STAT5, create_massive_transfusion_statistics_module },
+    { L"TransfusionOrderStatistics", L"统计分析管理", L"输血单统计(&6)", IDM_STAT6, create_transfusion_order_statistics_module },
     { L"Settings", L"系统",     L"系统设置(&S)...",     IDM_SETTINGS, create_settings_module  },
 };
 constexpr int g_moduleCount = sizeof(g_modules) / sizeof(g_modules[0]);

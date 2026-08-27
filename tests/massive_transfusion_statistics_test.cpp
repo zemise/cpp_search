@@ -124,6 +124,35 @@ int main() {
         CHECK(!component.excluded_by_component_filter);
         CHECK(component.counted);
     }
+
+    const std::vector<search::MassiveTransfusionRawRow> threshold_raw{
+        make_row("8", "D1", "P5", "2026-08-01 13:00:00", "未审核", "81", "血浆", "1599.99", "ML"),
+        make_row("9", "D2", "P6", "2026-08-01 14:00:00", "未审核", "91", "血浆", "1600", "ML"),
+        make_row("10", "D3", "P7", "2026-08-01 15:00:00", "未审核", "101", "血浆", "1600.01", "ML"),
+    };
+    query.threshold_ml = 1600.0;
+    query.threshold_inclusive = true;
+    summary = {};
+    events.clear();
+    rejected.clear();
+    CHECK(search::build_massive_transfusion_statistics(
+        query, threshold_raw, summary, events, rejected, error));
+    CHECK(summary.event_count == 2);
+    CHECK(events.size() == 2);
+
+    query.threshold_inclusive = false;
+    summary = {};
+    events.clear();
+    CHECK(search::build_massive_transfusion_statistics(
+        query, threshold_raw, summary, events, rejected, error));
+    CHECK(summary.event_count == 1);
+    CHECK(events.size() == 1);
+    CHECK(events[0].total_ml == "1600.01");
+
+    query.threshold_ml = 0.0;
+    CHECK(!search::build_massive_transfusion_statistics(
+        query, threshold_raw, summary, events, rejected, error));
+    CHECK(!error.empty());
     std::cout << "massive transfusion aggregation tests passed\n";
     return 0;
 }
