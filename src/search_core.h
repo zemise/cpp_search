@@ -566,7 +566,7 @@ struct MassiveTransfusionStatQuery {
     std::string end_date;
     std::string campus;  // 全部/老院/新院，按事件首张有效申请的申请科室派生
     std::string statistic_basis = "actual";       // actual/application；正式默认实际输血量
-    std::string event_time_source = "match";      // match/out/apply/check；仅实际输血口径使用
+    std::string event_time_source = "out";        // match/out/apply/check；仅实际输血口径使用
     bool include_platelet_and_cryoprecipitate = false;
     double threshold_ml = 1600.0;
     bool threshold_inclusive = true;  // true: >= threshold_ml, false: > threshold_ml

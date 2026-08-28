@@ -4238,6 +4238,31 @@ bool build_actual_massive_transfusion_statistics(
         value = std::mktime(&parsed);
         return value != static_cast<std::time_t>(-1);
     };
+    std::time_t load_start = 0;
+    std::time_t end_day_start = 0;
+    if (!datetime_value(start_date + " 00:00:00", load_start) ||
+        !datetime_value(end_date + " 00:00:00", end_day_start)) {
+        error = "valid start_date and end_date are required";
+        return false;
+    }
+    const std::time_t primary_load_end = end_day_start + 2 * 24 * 60 * 60;
+    const std::time_t audit_load_end = end_day_start + 24 * 60 * 60;
+    const auto auxiliary_time = [](const ActualTransfusionRawRow& row) {
+        if (!trim(row.match_date).empty()) return trim(row.match_date);
+        if (!trim(row.blood_out_date).empty()) return trim(row.blood_out_date);
+        if (!trim(row.apply_time).empty()) return trim(row.apply_time);
+        return trim(row.check_date);
+    };
+    const auto in_load_scope = [&](const ActualTransfusionRawRow& row) {
+        std::time_t value = 0;
+        const std::string selected = selected_time(row);
+        if (datetime_value(selected, value)) {
+            return value >= load_start && value < primary_load_end;
+        }
+        if (!selected.empty()) return true;  // 保留格式异常，交给异常核查。
+        return datetime_value(auxiliary_time(row), value) &&
+               value >= load_start && value < audit_load_end;
+    };
     const auto format_datetime = [](std::time_t value) {
         std::tm* parsed = std::localtime(&value);
         if (!parsed) return std::string{};
@@ -4282,7 +4307,7 @@ bool build_actual_massive_transfusion_statistics(
     };
     const auto in_page = [&](const ActualTransfusionRawRow& row) {
         const std::string value = selected_time(row);
-        if (value.empty()) return true;  // SQL 已用辅助时间把无所选时间记录限定在查询范围内。
+        if (value.empty()) return true;  // 候选范围已按辅助时间在 C++ 中精确复核。
         const std::string date = date_from_sql_datetime(value);
         return date >= start_date && date <= end_date;
     };
@@ -4297,6 +4322,8 @@ bool build_actual_massive_transfusion_statistics(
     std::map<std::string, std::vector<const ActualTransfusionRawRow*>> reviewed_by_bag;
     std::vector<const ActualTransfusionRawRow*> candidates;
     for (const auto& row : raw_rows) {
+        if (!in_load_scope(row)) continue;
+        ++summary.raw_record_count;
         const std::string verify = trim(row.verify_state);
         if (row.cross_match_deleted) {
             push_audit(row, "交叉配血记录已删除，不计量");
@@ -4545,14 +4572,50 @@ bool query_massive_transfusion_statistics(
 
     if (trim(query.statistic_basis) == "actual") {
         const std::string time_source = trim(query.event_time_source);
+        if (time_source != "match" && time_source != "out" &&
+            time_source != "apply" && time_source != "check") {
+            error = "event_time_source must be match, out, apply, or check";
+            return false;
+        }
         const std::string selected_expr =
             time_source == "out" ? "bo.BloodOut_Date" :
             time_source == "apply" ? "a.Apply_Time" :
             time_source == "check" ? "a.Check_Date" : "cm.Match_Date";
-        const std::string auxiliary_expr =
-            "COALESCE(cm.Match_Date,bo.BloodOut_Date,a.Apply_Time,a.Check_Date)";
+        const auto range_end = [&](const std::string& source) {
+            return "DATEADD(day," + std::string(source == time_source ? "2" : "1") +
+                   ",'" + sql_escape(end_date) + "')";
+        };
         std::ostringstream sql;
-        sql << "SELECT "
+        sql << "WITH CandidateIds AS ("
+            << "SELECT cm0.ID FROM LS_XK_BloodCrossMatch cm0 WITH (NOLOCK)"
+            << " WHERE cm0.Match_Date>='" << sql_escape(start_date) << "'"
+            << " AND cm0.Match_Date<" << range_end("match")
+            << " UNION SELECT cm1.ID FROM LS_XK_BloodRequestApply a1 WITH (NOLOCK)"
+            << " INNER JOIN LS_XK_BloodCrossMatch cm1 WITH (NOLOCK)"
+            << " ON cm1.ApplyFormNO=a1.ApplyFormNO"
+            << " WHERE a1.Apply_Time>='" << sql_escape(start_date) << "'"
+            << " AND a1.Apply_Time<" << range_end("apply")
+            << " UNION SELECT cm2.ID FROM LS_XK_BloodRequestApply a2 WITH (NOLOCK)"
+            << " INNER JOIN LS_XK_BloodCrossMatch cm2 WITH (NOLOCK)"
+            << " ON cm2.ApplyFormNO=a2.ApplyFormNO"
+            << " WHERE a2.Check_Date>='" << sql_escape(start_date) << "'"
+            << " AND a2.Check_Date<" << range_end("check")
+            << " UNION SELECT cm3.ID FROM LS_XK_BloodOutInfo o3 WITH (NOLOCK)"
+            << " INNER JOIN LS_XK_BloodCrossMatch cm3 WITH (NOLOCK)"
+            << " ON cm3.BloodInID=o3.BloodInID"
+            << " WHERE o3.BloodOut_Date>='" << sql_escape(start_date) << "'"
+            << " AND o3.BloodOut_Date<" << range_end("out")
+            << "),CandidateCrossMatch AS ("
+            << "SELECT cm0.* FROM LS_XK_BloodCrossMatch cm0 WITH (NOLOCK)"
+            << " INNER JOIN CandidateIds ids ON ids.ID=cm0.ID"
+            << "),CandidateBloodIds AS ("
+            << "SELECT DISTINCT cm0.BloodInID FROM CandidateCrossMatch cm0"
+            << " WHERE cm0.BloodInID IS NOT NULL"
+            << "),BloodOutSummary AS ("
+            << "SELECT o.BloodInID,MIN(o.BloodOut_Date) BloodOut_Date,"
+            << " COUNT_BIG(*) RecordCount FROM LS_XK_BloodOutInfo o WITH (NOLOCK)"
+            << " INNER JOIN CandidateBloodIds ids ON ids.BloodInID=o.BloodInID"
+            << " GROUP BY o.BloodInID) SELECT "
             << "isnull(CONVERT(varchar(32),cm.ID),''),isnull(LTRIM(RTRIM(cm.ApplyFormNO)),''),"
             << "isnull(LTRIM(RTRIM(cm.Patient_NO)),''),isnull(LTRIM(RTRIM(a.Patient_NOType)),''),"
             << "isnull(LTRIM(RTRIM(a.Patient_Name)),''),isnull(LTRIM(RTRIM(cm.VerifyState)),''),"
@@ -4566,18 +4629,12 @@ bool query_massive_transfusion_statistics(
             << "isnull(CONVERT(varchar(32),bi.ID),''),isnull(LTRIM(RTRIM(bi.BloodBagNO)),''),"
             << "isnull(LTRIM(RTRIM(bi.CmpProductCode)),''),isnull(LTRIM(RTRIM(comp.Blood_Composition)),''),"
             << "isnull(LTRIM(RTRIM(CONVERT(varchar(32),comp.Norm))),''),isnull(LTRIM(RTRIM(comp.Unit)),'')"
-            << " FROM LS_XK_BloodCrossMatch cm WITH (NOLOCK)"
+            << " FROM CandidateCrossMatch cm"
             << " LEFT JOIN LS_XK_BloodRequestApply a WITH (NOLOCK)"
             << " ON a.ApplyFormNO=cm.ApplyFormNO"
             << " LEFT JOIN LS_XK_BloodInfo bi WITH (NOLOCK) ON bi.ID=cm.BloodInID"
             << " LEFT JOIN LS_XK_B_CompositionInfo comp WITH (NOLOCK) ON comp.ID=bi.CompositionID"
-            << " LEFT JOIN (SELECT o.BloodInID,MIN(o.BloodOut_Date) BloodOut_Date,"
-            << " COUNT_BIG(*) RecordCount FROM LS_XK_BloodOutInfo o WITH (NOLOCK)"
-            << " GROUP BY o.BloodInID) bo ON bo.BloodInID=cm.BloodInID"
-            << " WHERE ((" << selected_expr << ">='" << sql_escape(start_date) << "' AND "
-            << selected_expr << "<DATEADD(day,2,'" << sql_escape(end_date) << "')) OR ("
-            << selected_expr << " IS NULL AND " << auxiliary_expr << ">='" << sql_escape(start_date)
-            << "' AND " << auxiliary_expr << "<DATEADD(day,1,'" << sql_escape(end_date) << "')))"
+            << " LEFT JOIN BloodOutSummary bo ON bo.BloodInID=cm.BloodInID"
             << " ORDER BY cm.Patient_NO," << selected_expr << ",cm.BloodInID,cm.ID";
         if (log) log("exec sql: " + sql.str() + "\n");
         SQLHSTMT stmt = SQL_NULL_HSTMT;
@@ -4603,7 +4660,6 @@ bool query_massive_transfusion_statistics(
         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
         const bool built = build_actual_massive_transfusion_statistics(
             query, raw_rows, summary, events, audit_rows, error);
-        if (built) summary.raw_record_count = static_cast<int>(raw_rows.size());
         return built;
     }
 

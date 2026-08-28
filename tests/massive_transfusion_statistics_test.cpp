@@ -61,7 +61,7 @@ search::ActualTransfusionRawRow make_actual_row(
 int main() {
     search::MassiveTransfusionStatQuery query;
     CHECK(query.statistic_basis == "actual");
-    CHECK(query.event_time_source == "match");
+    CHECK(query.event_time_source == "out");
     query.start_date = "2026-08-01";
     query.end_date = "2026-08-02";
     query.campus = "新院";
@@ -253,6 +253,28 @@ int main() {
     CHECK(events.empty());
     CHECK(rejected.size() == 1);
     CHECK(rejected[0].data_status.find("配血时间缺失") != std::string::npos);
+
+    auto scoped = make_actual_row(
+        "C12", "A12", "P14", "B12", "2026-08-01 15:00:00", "血浆", "1600", "ML");
+    auto outside_duplicate = scoped;
+    outside_duplicate.cross_match_id = "C13";
+    outside_duplicate.match_date = "2026-08-10 15:00:00";
+    outside_duplicate.apply_time = outside_duplicate.match_date;
+    outside_duplicate.check_date = outside_duplicate.match_date;
+    auto outside_missing_time = make_actual_row(
+        "C14", "A14", "P15", "B14", "", "血浆", "1600", "ML");
+    outside_missing_time.apply_time = "2026-08-10 16:00:00";
+    outside_missing_time.check_date = outside_missing_time.apply_time;
+    summary = {};
+    events.clear();
+    rejected.clear();
+    CHECK(search::build_actual_massive_transfusion_statistics(
+        query, {scoped, outside_duplicate, outside_missing_time},
+        summary, events, rejected, error));
+    CHECK(summary.raw_record_count == 1);
+    CHECK(summary.event_count == 1);
+    CHECK(events.size() == 1);
+    CHECK(rejected.empty());
 
     auto time_choice = make_actual_row(
         "C11", "A11", "P13", "B11", "2026-08-01 08:00:00", "血浆", "1600", "ML");

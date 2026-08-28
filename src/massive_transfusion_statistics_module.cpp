@@ -194,7 +194,7 @@ struct QueryResult {
     double thresholdMl = 1600.0;
     bool thresholdInclusive = true;
     std::string statisticBasis = "actual";
-    std::string eventTimeSource = "match";
+    std::string eventTimeSource = "out";
     long long elapsedMs = 0;
     std::string error;
     Summary summary;
@@ -924,6 +924,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             state->eventTimeSource = makeCombo(hwnd, IDC_EVENT_TIME_SOURCE);
             const wchar_t* timeSources[] = {L"配血时间", L"出库时间", L"申请时间", L"血库审核时间"};
             addComboItems(state->eventTimeSource, timeSources, static_cast<int>(std::size(timeSources)));
+            SendMessageW(state->eventTimeSource, CB_SETCURSEL, 1, 0);
             EnableWindow(state->eventTimeSource, TRUE);
             state->query = search::create_button(hwnd, IDC_QUERY, L"查询", 0, 0, 0, 0);
             SendMessageW(state->query, BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
@@ -963,7 +964,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (LOWORD(wp) == IDC_STATISTIC_BASIS && HIWORD(wp) == CBN_SELCHANGE) {
                 const bool actual = SendMessageW(state->statisticBasis, CB_GETCURSEL, 0, 0) == 0;
                 EnableWindow(state->eventTimeSource, actual);
-                SendMessageW(state->eventTimeSource, CB_SETCURSEL, actual ? 0 : 2, 0);
+                SendMessageW(state->eventTimeSource, CB_SETCURSEL, actual ? 1 : 2, 0);
                 return 0;
             }
             break;

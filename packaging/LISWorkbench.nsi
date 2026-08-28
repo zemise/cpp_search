@@ -4,7 +4,7 @@ Unicode false
 !define APP_NAME "LIS Workbench"
 !endif
 !ifndef APP_VERSION
-!define APP_VERSION "v2026.08.27.3"
+!define APP_VERSION "v2026.08.28"
 !endif
 !ifndef APP_PUBLISHER
 !define APP_PUBLISHER "Zhao Wang"

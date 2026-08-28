@@ -554,7 +554,7 @@ ListView 单元格复制菜单统一使用公共预览规则：右键显示可�
 
 ## 大量输血统计
 
-`统计分析管理 -> 大量输血统计` 提供“实际输血量”和“申请量对照”两种只读口径，正式默认“实际输血量”和“配血时间”。实际输血量以 `LS_XK_BloodCrossMatch.VerifyState='已审核'` 作为事实，并按唯一 `BloodInID` 计量；用户可主动切换申请量对照。
+`统计分析管理 -> 大量输血统计` 提供“实际输血量”和“申请量对照”两种只读口径，正式默认“实际输血量”和“出库时间”。实际输血量以 `LS_XK_BloodCrossMatch.VerifyState='已审核'` 作为事实，并按唯一 `BloodInID` 计量；用户可主动切换申请量对照。
 
 申请量对照分支从页面开始日期 `00:00:00` 起读取，不向前回溯；结束条件读取到页面结束日期次日 `00:00:00 + 24小时`，用于补齐最后一天起始事件的完整窗口。只有事件第一张有效申请时间位于页面日期范围内的事件可进入结果，结束日期以后读取的申请只能补充已有事件，不能新建结果事件。
 
@@ -584,19 +584,24 @@ T0 <= Apply_Time < T0 + 24小时
 实际输血量查询链路为：
 
 ```text
-LS_XK_BloodCrossMatch cm
-    LEFT JOIN LS_XK_BloodRequestApply a ON a.ApplyFormNO=cm.ApplyFormNO
-    LEFT JOIN LS_XK_BloodInfo bi ON bi.ID=cm.BloodInID
-    LEFT JOIN LS_XK_B_CompositionInfo comp ON comp.ID=bi.CompositionID
-    LEFT JOIN (
-        SELECT BloodInID, MIN(BloodOut_Date), COUNT_BIG(*)
-        FROM LS_XK_BloodOutInfo
-        GROUP BY BloodInID
-    ) bo ON bo.BloodInID=cm.BloodInID
+四个时间字段分别按日期范围生成 CandidateIds
+    Match_Date       -> BloodCrossMatch.ID
+    Apply_Time       -> ApplyFormNO -> BloodCrossMatch.ID
+    Check_Date       -> ApplyFormNO -> BloodCrossMatch.ID
+    BloodOut_Date    -> BloodInID   -> BloodCrossMatch.ID
+              |
+              +-- UNION 去重
+              v
+CandidateCrossMatch
+    -> 只对候选 BloodInID 聚合 BloodOutInfo
+    -> 关联 RequestApply / BloodInfo / CompositionInfo
+    -> C++ 按所选时间和 COALESCE 优先级精确复核范围
 ```
 
-出库表只做一次按 `BloodInID` 的预聚合，避免对每条交叉配血记录执行相关子查询；申请表采用 `a.ApplyFormNO=cm.ApplyFormNO` 直接等值连接，避免在连接列两侧执行 `LTRIM/RTRIM` 而妨碍索引使用。现场只读核查已确认申请单号直接关联无缺失，去空格只用于返回后的显示和 C++ 分组。
+查询不再使用跨表的 `selected_time OR (selected_time IS NULL AND COALESCE(...))` 条件。四个时间来源分别使用可直接下推的日期条件生成候选交叉配血 ID：用户选择的事件时间读取到结束日期后两天，用于补齐末日事件窗口；其余三个来源读取到结束日期次日，只用于覆盖所选时间缺失的异常候选。候选 ID 使用 `UNION` 去重后再关联业务表，并且 `BloodOutInfo` 只为候选 `BloodInID` 计算最早出库时间和记录数。
 
-实际口径可选 `Match_Date / BloodOut_Date / Apply_Time / Check_Date` 作为事件时间，默认 `Match_Date`。同一患者按所选时间升序，以第一袋为起点建立左闭右开的24小时窗口；所选时间为空时不回退，进入时间缺失核查。`BloodOutInfo` 多行时只取最早出库时间并标记核查，不能放大血袋数。事件的“实际输血制品构成”只按 `CompositionInfo.Blood_Composition + Norm + Unit` 折算后的实际血袋毫升数汇总，不读取申请子表成分；申请量对照分支才按申请成分生成“申请制品构成”。查询状态同时显示 SQL 返回原始记录数和总耗时。
+SQL 候选集允许安全地适度多取；C++ 聚合入口会再次按原语义精确过滤：所选时间非空时使用所选时间范围，所选时间为空时按 `Match_Date -> BloodOut_Date -> Apply_Time -> Check_Date` 的优先级取第一个非空辅助时间。这样既保留缺失时间异常核查，又避免范围外记录污染血袋去重。申请表仍采用 `a.ApplyFormNO=cm.ApplyFormNO` 直接等值连接，去空格只用于返回后的显示和 C++ 分组。
+
+实际口径可选 `Match_Date / BloodOut_Date / Apply_Time / Check_Date` 作为事件时间，默认 `BloodOut_Date`。同一患者按所选时间升序，以第一袋为起点建立左闭右开的24小时窗口；所选时间为空时不回退，进入时间缺失核查。`BloodOutInfo` 多行时只取最早出库时间并标记核查，不能放大血袋数。事件的“实际输血制品构成”只按 `CompositionInfo.Blood_Composition + Norm + Unit` 折算后的实际血袋毫升数汇总，不读取申请子表成分；申请量对照分支才按申请成分生成“申请制品构成”。查询状态同时显示 SQL 返回原始记录数和总耗时。
 
 `VerifyState='未审核'`、未知状态、逻辑删除的交叉配血记录不进入正式统计而进入核查；申请单已删除、已驳回、缺失或病人号不一致不覆盖已审核的实际输血事实，血袋仍计量并标记申请单异常。实际容量读取 `BloodInfo.CompositionID -> CompositionInfo.Norm + Unit`，折算仍使用 `ML×1 / 普通U×200 / 冷沉淀U×20 / 治疗量×250`。事件、血袋明细和 CSV 均记录统计口径、事件时间口径、阈值、开关和异常状态。

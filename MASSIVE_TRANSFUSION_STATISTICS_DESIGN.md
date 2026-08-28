@@ -46,7 +46,7 @@
 
 | 项目 | 已确认口径 |
 | --- | --- |
-| 时间字段 | 用户自行选择；默认 `LS_XK_BloodCrossMatch.Match_Date`（配血时间） |
+| 时间字段 | 用户自行选择；默认 `LS_XK_BloodOutInfo.BloodOut_Date`（出库时间） |
 | 其他时间选项 | `LS_XK_BloodOutInfo.BloodOut_Date`（出库时间）、`LS_XK_BloodRequestApply.Apply_Time`（申请时间）、`LS_XK_BloodRequestApply.Check_Date`（血库审核时间） |
 | 页面日期归属 | 与所选时间字段一致，按事件第一袋血的所选时间归属 |
 | 实际输血状态 | `VerifyState='已审核'` 参与统计；`未审核`不计量；其他或空状态进入异常核查 |
@@ -120,7 +120,7 @@ flowchart TD
     H --> K
     G --> K
 
-    K --> L["以第一袋的所选时间建立24小时事件<br/>默认 Match_Date"]
+    K --> L["以第一袋的所选时间建立24小时事件<br/>默认 BloodOut_Date"]
     L --> M["按唯一 BloodInID 去重"]
     M --> N["折算每袋实际血量"]
     N --> O["累计24小时实际输血量"]
@@ -142,7 +142,9 @@ LS_XK_BloodCrossMatch cm
         ON bo.BloodInID = cm.BloodInID
 ```
 
-`LS_XK_BloodOutInfo` 如果同一个 `BloodInID` 存在多行，不能直接连接后累计，否则会放大血袋数量。正式查询按 `BloodInID` 一次性预聚合出 `MIN(BloodOut_Date) + COUNT_BIG(*)`，再与实际输血事实连接；不再为每一条交叉配血记录执行相关聚合。申请表使用 `a.ApplyFormNO=cm.ApplyFormNO` 直接等值连接，现场只读核查已确认直接关联无缺失，从而避免连接列函数影响索引使用。
+`LS_XK_BloodOutInfo` 如果同一个 `BloodInID` 存在多行，不能直接连接后累计，否则会放大血袋数量。正式查询先由配血、出库、申请、血库审核四个时间字段分别按日期范围生成候选交叉配血 ID，使用 `UNION` 去重后，仅对候选 `BloodInID` 聚合 `MIN(BloodOut_Date) + COUNT_BIG(*)`；不再使用跨表 `OR + COALESCE` 过滤，也不再聚合与本次候选无关的出库血袋。申请表使用 `a.ApplyFormNO=cm.ApplyFormNO` 直接等值连接，现场只读核查已确认直接关联无缺失，从而避免连接列函数影响索引使用。
+
+SQL 候选行返回后，C++ 再按原有时间语义复核范围：所选事件时间非空时按所选时间判断；所选时间为空时按 `Match_Date -> BloodOut_Date -> Apply_Time -> Check_Date` 取第一个非空辅助时间，只保留页面日期范围内的异常核查记录。双层过滤防止范围外相同 `BloodInID` 造成重复血袋误判。
 
 ### 各表职责
 
@@ -270,7 +272,7 @@ LS_XK_BloodCrossMatch.BloodInID
 实际输血量
 ```
 
-页面已正式默认“实际输血量”，默认事件时间为“配血时间”；用户仍可主动切换“申请量对照”。当前事件列表已展示：
+页面已正式默认“实际输血量”，默认事件时间为“出库时间”；用户仍可主动切换“申请量对照”。当前事件列表已展示：
 
 - 第一袋实际输血时间、窗口结束时间和最后实际输血时间。
 - 实际血袋数、实际输血量。
@@ -303,7 +305,7 @@ LS_XK_BloodCrossMatch.BloodInID
 1. 现场核查交叉配血、血袋、出库和成分表字段及值域，重点核对四个时间字段、`Norm` 和 `Unit` 的空值情况。
 2. 已完成：新增独立的实际输血原始行结构、只读查询和纯聚合函数，未改写现有申请量聚合。
 3. 已完成：按 `BloodInID` 去重，并覆盖已审核状态、重复血袋、申请单异常、时间缺失和容量折算测试。
-4. 已确认：实际输血量正式设为默认统计口径，配血时间为默认事件时间。
+4. 已确认：实际输血量正式设为默认统计口径，出库时间为默认事件时间。
 5. 持续抽查：四种事件时间、跨科室事件、删除记录核查和申请单异常场景。
 6. 申请量长期保留为对照，不再作为页面默认口径。
 
