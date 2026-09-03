@@ -60,7 +60,9 @@ constexpr int IDC_DROPDOWN_LIST = 4510;
 constexpr int FIRST_DATA_COLUMN = 0;
 constexpr int FIRST_SHARED_BARCODE_COLUMN = 0;
 constexpr int LAST_SHARED_BARCODE_COLUMN = 7;
-constexpr int LAST_DATA_COLUMN = 26;
+constexpr int LAST_DATA_COLUMN = 28;
+constexpr int REVIEW_ELAPSED_COLUMN = 16;
+constexpr int FEE_COLUMN = 18;
 constexpr UINT IDM_COPY_CELL = 41201;
 const COLORREF COLOR_NOT_MACHINE = RGB(0xFF, 0xFF, 0x54);
 const COLORREF COLOR_LOADED_NOT_REVIEWED = RGB(0xFF, 0xFF, 0xFF);
@@ -130,18 +132,20 @@ const ListColumn BARCODE_COLUMNS[] = {
     {12, L"标本", 72},
     {13, L"检验者", 80},
     {14, L"审核者", 80},
-    {15, L"上机状态", 112},
-    {16, L"费用", 76},
-    {17, L"申请医生", 90},
-    {18, L"状态", 66},
-    {19, L"备注", 58},
-    {20, L"原因", 58},
-    {21, L"送检", 70},
-    {22, L"送检时间", 140},
-    {23, L"申请时间", 150},
-    {24, L"取消时间", 140},
-    {25, L"取消人", 82},
-    {26, L"HZID", 70},
+    {15, L"审核时间", 150},
+    {16, L"签收-审核时间差", 160},
+    {17, L"上机状态", 112},
+    {18, L"费用", 76},
+    {19, L"申请医生", 90},
+    {20, L"状态", 66},
+    {21, L"备注", 58},
+    {22, L"原因", 58},
+    {23, L"送检", 70},
+    {24, L"送检时间", 140},
+    {25, L"申请时间", 150},
+    {26, L"取消时间", 140},
+    {27, L"取消人", 82},
+    {28, L"HZID", 70},
 };
 
 void runQuery(HWND hwnd, BarcodeState* st);
@@ -971,6 +975,8 @@ void insertRow(HWND list, int index, const search::BarcodeQueryRow& row,
         &row.sample_name,
         &row.tester,
         &row.reviewer,
+        &row.review_time,
+        &row.review_elapsed,
         &row.machine_status,
         &row.fee,
         &row.request_doctor,
@@ -984,6 +990,9 @@ void insertRow(HWND list, int index, const search::BarcodeQueryRow& row,
         &row.cancel_operator,
         &row.hzid,
     };
+    static_assert(sizeof(cells) / sizeof(cells[0]) ==
+                  sizeof(BARCODE_COLUMNS) / sizeof(BARCODE_COLUMNS[0]),
+                  "Barcode columns and row cells must stay aligned");
     const int cellCount = static_cast<int>(sizeof(cells) / sizeof(cells[0]));
     for (int col = 0; col < cellCount; ++col) {
         const bool sharedBarcodeColumn =
@@ -1011,18 +1020,20 @@ const std::string& barcodeSortValue(const search::BarcodeQueryRow& row, int col)
         case 12: return row.sample_name;
         case 13: return row.tester;
         case 14: return row.reviewer;
-        case 15: return row.machine_status;
-        case 16: return row.fee;
-        case 17: return row.request_doctor;
-        case 18: return row.status;
-        case 19: return row.note;
-        case 20: return row.reason;
-        case 21: return row.submitter;
-        case 22: return row.submit_time;
-        case 23: return row.request_time;
-        case 24: return row.cancel_time;
-        case 25: return row.cancel_operator;
-        case 26: return row.hzid;
+        case 15: return row.review_time;
+        case 16: return row.review_elapsed;
+        case 17: return row.machine_status;
+        case 18: return row.fee;
+        case 19: return row.request_doctor;
+        case 20: return row.status;
+        case 21: return row.note;
+        case 22: return row.reason;
+        case 23: return row.submitter;
+        case 24: return row.submit_time;
+        case 25: return row.request_time;
+        case 26: return row.cancel_time;
+        case 27: return row.cancel_operator;
+        case 28: return row.hzid;
         default: return empty;
     }
 }
@@ -1040,7 +1051,17 @@ int compareBarcodeSortValue(const search::BarcodeQueryRow& a,
                             int col) {
     const std::string left = search::trim(barcodeSortValue(a, col));
     const std::string right = search::trim(barcodeSortValue(b, col));
-    if (col == 16) {
+    if (col == REVIEW_ELAPSED_COLUMN) {
+        const bool leftValid = a.review_elapsed_seconds >= 0;
+        const bool rightValid = b.review_elapsed_seconds >= 0;
+        if (leftValid && rightValid) {
+            if (a.review_elapsed_seconds < b.review_elapsed_seconds) return -1;
+            if (a.review_elapsed_seconds > b.review_elapsed_seconds) return 1;
+            return 0;
+        }
+        if (leftValid != rightValid) return leftValid ? -1 : 1;
+    }
+    if (col == FEE_COLUMN) {
         double ln = 0.0, rn = 0.0;
         const bool lok = parseDouble(left, ln);
         const bool rok = parseDouble(right, rn);
@@ -1054,6 +1075,12 @@ int compareBarcodeSortValue(const search::BarcodeQueryRow& a,
     if (left < right) return -1;
     if (left > right) return 1;
     return 0;
+}
+
+void calculateReviewElapsed(search::BarcodeQueryRow& row) {
+    row.review_elapsed_seconds = search::sql_datetime_diff_seconds(
+        row.receive_time, row.review_time);
+    row.review_elapsed = search::format_duration_seconds_zh(row.review_elapsed_seconds);
 }
 
 std::string barcodeRowKey(const search::BarcodeQueryRow& row) {
@@ -1282,6 +1309,9 @@ void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult
         return;
     }
     st->rows = std::move(result->rows);
+    for (auto& row : st->rows) {
+        calculateReviewElapsed(row);
+    }
     sortBarcodeRowsForDisplay(st);
     presentRows(st);
     updateExportButton(st);

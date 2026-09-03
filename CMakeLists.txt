@@ -234,6 +234,17 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME transfusion_order_core_tests COMMAND transfusion_order_core_tests)
 
+    add_executable(search_datetime_tests
+        tests/search_datetime_test.cpp
+        src/search_core.cpp
+        src/search_text.cpp
+    )
+    target_include_directories(search_datetime_tests PRIVATE src)
+    if(WIN32)
+        target_link_libraries(search_datetime_tests PRIVATE odbc32)
+    endif()
+    add_test(NAME search_datetime_tests COMMAND search_datetime_tests)
+
     add_executable(massive_transfusion_core_tests
         tests/massive_transfusion_statistics_test.cpp
     )

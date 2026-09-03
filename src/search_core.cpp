@@ -818,6 +818,25 @@ bool should_add_supplemental_orders(const SpecimenBarcodeResult& result) {
 
 }  // namespace
 
+long long sql_datetime_diff_seconds(const std::string& start, const std::string& end) {
+    return seconds_between_sql_datetimes(start, end);
+}
+
+std::string format_duration_seconds_zh(long long total_seconds) {
+    if (total_seconds < 0) return "";
+    const long long hours = total_seconds / 3600;
+    const long long minutes = (total_seconds % 3600) / 60;
+    const long long seconds = total_seconds % 60;
+    if (hours > 0) {
+        return std::to_string(hours) + "小时" + std::to_string(minutes) +
+            "分钟" + std::to_string(seconds) + "秒";
+    }
+    if (minutes > 0) {
+        return std::to_string(minutes) + "分钟" + std::to_string(seconds) + "秒";
+    }
+    return std::to_string(seconds) + "秒";
+}
+
 bool query_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log) {
     rows.clear();
 #ifndef _WIN32
@@ -2165,6 +2184,7 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         << "isnull(LTRIM(RTRIM(b.SAMP_NAME)),'') AS sample_name,"
         << "isnull(LTRIM(RTRIM(rd.TESTER_NAME)),'') AS tester_name,"
         << "isnull(LTRIM(RTRIM(rd.REVIEWER_NAME)),'') AS reviewer_name,"
+        << "isnull(CONVERT(varchar(19),rd.REP_TIME,120),'') AS review_time,"
         << "isnull(LTRIM(RTRIM(CONVERT(varchar(32),b.FY))),'') AS fee,"
         << "isnull(LTRIM(RTRIM(b.REQ_DRN)),'') AS request_doctor,"
         << "isnull(CONVERT(varchar(10),b.ZT_FLAG),'') AS status,"
@@ -2191,7 +2211,7 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         << " WHERE isnull(r.DELETE_BIT,0)=0"
         << " AND r.TXM_NO=b.BARCODE) rs"
         << " OUTER APPLY (SELECT TOP 1"
-        << " r.REP_NO,r.OPER_NO,r.CHK_DATE,r.MACH_CODE,r.ROOM_CODE,mach.MACH_NAME,"
+        << " r.REP_NO,r.OPER_NO,r.CHK_DATE,r.REP_TIME,r.MACH_CODE,r.ROOM_CODE,mach.MACH_NAME,"
         << " r.OPER_CODE,r.REP_OPER,"
         << " isnull(NULLIF(LTRIM(RTRIM(emp_oper.NAME)),''),LTRIM(RTRIM(CONVERT(varchar(50),r.OPER_CODE)))) AS TESTER_NAME,"
         << " isnull(NULLIF(LTRIM(RTRIM(emp_rep.NAME)),''),LTRIM(RTRIM(CONVERT(varchar(50),r.REP_OPER)))) AS REVIEWER_NAME"
@@ -2231,23 +2251,24 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         row.sample_name    = fetch_column(stmt, 13);
         row.tester         = fetch_column(stmt, 14);
         row.reviewer       = fetch_column(stmt, 15);
-        row.fee            = fetch_column(stmt, 16);
-        row.request_doctor = fetch_column(stmt, 17);
-        row.status         = fetch_column(stmt, 18);
-        row.note           = fetch_column(stmt, 19);
-        row.reason         = fetch_column(stmt, 20);
-        row.submitter      = fetch_column(stmt, 21);
-        row.submit_time    = fetch_column(stmt, 22);
-        row.request_time   = fetch_column(stmt, 23);
-        row.cancel_time    = fetch_column(stmt, 24);
-        row.cancel_operator = fetch_column(stmt, 25);
-        row.hzid           = fetch_column(stmt, 26);
-        row.machine_status = fetch_column(stmt, 27);
-        row.report_no      = fetch_column(stmt, 28);
-        row.machine_code   = fetch_column(stmt, 29);
-        row.machine_name   = fetch_column(stmt, 30);
-        row.room_code      = fetch_column(stmt, 31);
-        row.inspect_date   = fetch_column(stmt, 32);
+        row.review_time    = fetch_column(stmt, 16);
+        row.fee            = fetch_column(stmt, 17);
+        row.request_doctor = fetch_column(stmt, 18);
+        row.status         = fetch_column(stmt, 19);
+        row.note           = fetch_column(stmt, 20);
+        row.reason         = fetch_column(stmt, 21);
+        row.submitter      = fetch_column(stmt, 22);
+        row.submit_time    = fetch_column(stmt, 23);
+        row.request_time   = fetch_column(stmt, 24);
+        row.cancel_time    = fetch_column(stmt, 25);
+        row.cancel_operator = fetch_column(stmt, 26);
+        row.hzid           = fetch_column(stmt, 27);
+        row.machine_status = fetch_column(stmt, 28);
+        row.report_no      = fetch_column(stmt, 29);
+        row.machine_code   = fetch_column(stmt, 30);
+        row.machine_name   = fetch_column(stmt, 31);
+        row.room_code      = fetch_column(stmt, 32);
+        row.inspect_date   = fetch_column(stmt, 33);
         if (!campus_matches(row.dept_name)) continue;
         rows.push_back(row);
     }

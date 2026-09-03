@@ -244,6 +244,9 @@ struct BarcodeQueryRow {
     std::string sample_name;     // 标本
     std::string tester;          // 检验者
     std::string reviewer;        // 审核者
+    std::string review_time;     // 审核时间（REP_TIME）
+    std::string review_elapsed;  // 签收-审核时间差（C++ 计算）
+    long long review_elapsed_seconds = -1; // 时间差排序用
     std::string fee;             // 费用
     std::string request_doctor;  // 申请医生
     std::string status;          // 状态
@@ -783,6 +786,9 @@ struct OutpatientChargeRow {
 };
 
 using LogFn = std::function<void(const std::string&)>;
+
+long long sql_datetime_diff_seconds(const std::string& start, const std::string& end);
+std::string format_duration_seconds_zh(long long total_seconds);
 
 bool query_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log = {});
 bool query_barcode_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log = {});
