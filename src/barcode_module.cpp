@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -60,6 +61,9 @@ constexpr int IDC_CANCEL_REASON = 4116;
 constexpr int IDC_EXPORT = 4118;
 constexpr int IDC_LIST = 4120;
 constexpr int IDC_STATUS = 4121;
+constexpr int IDC_PROGRESS = 4123;
+constexpr int IDC_ACTIVITY_PANEL = 4126;
+constexpr int IDC_ACTIVITY_LABEL = 4127;
 constexpr int IDC_DROPDOWN_LIST = 4510;
 constexpr int FIRST_DATA_COLUMN = 0;
 constexpr int FIRST_SHARED_BARCODE_COLUMN = 0;
@@ -72,6 +76,9 @@ const COLORREF COLOR_NOT_MACHINE = RGB(0xFF, 0xFF, 0x54);
 const COLORREF COLOR_LOADED_NOT_REVIEWED = RGB(0xFF, 0xFF, 0xFF);
 const COLORREF COLOR_REVIEWED_NOT_SENT = RGB(0x6F, 0x94, 0xE6);
 const COLORREF COLOR_SENT = RGB(0x99, 0xBB, 0x90);
+const COLORREF COLOR_ALERT_BACKGROUND = RGB(0xFF, 0xE8, 0xE8);
+const COLORREF COLOR_ALERT_TEXT = RGB(0xA4, 0x00, 0x00);
+const COLORREF COLOR_ACTIVITY_BACKGROUND = RGB(0xFF, 0xFF, 0xFF);
 
 struct BarcodeState {
     ModuleContext ctx;
@@ -95,7 +102,13 @@ struct BarcodeState {
     HWND legend = nullptr;
     HWND list = nullptr;
     HWND status = nullptr;
+    HWND progress = nullptr;
+    HWND activityPanel = nullptr;
+    HWND activityLabel = nullptr;
+    HWND tooltip = nullptr;
     HBRUSH bgBrush = nullptr;
+    HBRUSH alertBrush = nullptr;
+    HBRUSH activityBrush = nullptr;
     std::vector<search::RoomOption> allRooms;
     std::vector<search::RoomOption> rooms;
     std::vector<search::BarcodeQueryRow> rows;
@@ -111,6 +124,8 @@ struct BarcodeState {
     std::atomic_bool cancelExport{false};
     bool querying = false;
     bool exporting = false;
+    bool statusIsAlert = false;
+    std::wstring lastAlertText;
 };
 
 struct BarcodeQueryResult {
@@ -207,7 +222,129 @@ HWND dateTimePicker(HWND parent, int id, int x, int y, int w, int h) {
 }
 
 void setStatus(BarcodeState* st, const std::wstring& text) {
-    if (st && st->status) SetWindowTextW(st->status, text.c_str());
+    if (!st || !st->status) return;
+    st->statusIsAlert = false;
+    st->lastAlertText.clear();
+    SetWindowTextW(st->status, text.c_str());
+    InvalidateRect(st->status, nullptr, TRUE);
+}
+
+void showAlert(BarcodeState* st, const std::wstring& text) {
+    if (!st || !st->status) return;
+    st->statusIsAlert = true;
+    st->lastAlertText = text;
+    SetWindowTextW(st->status, (L"  !  " + text + L"（点击查看详情）").c_str());
+    InvalidateRect(st->status, nullptr, TRUE);
+}
+
+void addTooltip(HWND tooltip, HWND control, const wchar_t* text) {
+    if (!tooltip || !control || !text) return;
+    TTTOOLINFOW tool{};
+    tool.cbSize = sizeof(tool);
+    tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tool.hwnd = GetParent(control);
+    tool.uId = reinterpret_cast<UINT_PTR>(control);
+    tool.lpszText = const_cast<wchar_t*>(text);
+    SendMessageW(tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+}
+
+void positionActivity(HWND owner, BarcodeState* st) {
+    if (!owner || !st || !st->activityPanel) return;
+    RECT rc{};
+    GetClientRect(owner, &rc);
+    const float scale = search::dpi_scale_factor(owner);
+    const int margin = static_cast<int>(12 * scale);
+    const int listTop = static_cast<int>(120 * scale);
+    const int cardWidth = (std::min)(static_cast<int>(400 * scale),
+                                     (std::max)(static_cast<int>(260 * scale),
+                                                static_cast<int>(rc.right) - margin * 2));
+    const int cardHeight = static_cast<int>(96 * scale);
+    const int x = (std::max)(margin, (static_cast<int>(rc.right) - cardWidth) / 2);
+    const int availableHeight = (std::max)(cardHeight,
+        static_cast<int>(rc.bottom) - listTop);
+    const int y = listTop + (std::max)(static_cast<int>(18 * scale),
+        (availableHeight - cardHeight) / 2);
+    const int contentX = x + static_cast<int>(24 * scale);
+    const int contentWidth = (std::max)(static_cast<int>(160 * scale),
+        cardWidth - static_cast<int>(48 * scale));
+
+    MoveWindow(st->activityPanel, x, y, cardWidth, cardHeight, TRUE);
+    MoveWindow(st->activityLabel, contentX, y + static_cast<int>(18 * scale),
+               contentWidth, static_cast<int>(26 * scale), TRUE);
+    MoveWindow(st->progress, contentX, y + static_cast<int>(55 * scale),
+               contentWidth, static_cast<int>(16 * scale), TRUE);
+}
+
+void showActivityCard(HWND owner, BarcodeState* st) {
+    if (!owner || !st) return;
+    positionActivity(owner, st);
+    const HWND controls[] = {st->activityPanel, st->activityLabel, st->progress};
+    for (HWND control : controls) {
+        if (!control) continue;
+        ShowWindow(control, SW_SHOWNA);
+        SetWindowPos(control, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+}
+
+void showQueryActivity(HWND owner, BarcodeState* st) {
+    if (!owner || !st) return;
+    if (st->activityLabel) SetWindowTextW(st->activityLabel, L"正在查询全部条码，请稍候…");
+    if (st->progress) {
+        LONG_PTR style = GetWindowLongPtrW(st->progress, GWL_STYLE);
+        SetWindowLongPtrW(st->progress, GWL_STYLE, style | PBS_MARQUEE);
+        SetWindowPos(st->progress, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        SendMessageW(st->progress, PBM_SETMARQUEE, TRUE, 35);
+    }
+    showActivityCard(owner, st);
+}
+
+void showExportActivity(HWND owner, BarcodeState* st, size_t total) {
+    if (!owner || !st) return;
+    if (st->activityLabel) {
+        SetWindowTextW(st->activityLabel,
+                       (L"正在导出全部 " + std::to_wstring(total) + L" 条记录…").c_str());
+    }
+    if (st->progress) {
+        SendMessageW(st->progress, PBM_SETMARQUEE, FALSE, 0);
+        LONG_PTR style = GetWindowLongPtrW(st->progress, GWL_STYLE);
+        SetWindowLongPtrW(st->progress, GWL_STYLE, style & ~static_cast<LONG_PTR>(PBS_MARQUEE));
+        SetWindowPos(st->progress, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        SendMessageW(st->progress, PBM_SETRANGE32, 0,
+                     static_cast<LPARAM>((std::min)(total, static_cast<size_t>(INT_MAX))));
+        SendMessageW(st->progress, PBM_SETPOS, 0, 0);
+    }
+    showActivityCard(owner, st);
+}
+
+void hideActivity(HWND owner, BarcodeState* st) {
+    if (!owner || !st) return;
+    RECT dirty{};
+    if (st->activityPanel) {
+        GetWindowRect(st->activityPanel, &dirty);
+        MapWindowPoints(nullptr, owner, reinterpret_cast<POINT*>(&dirty), 2);
+    }
+    HDWP deferred = BeginDeferWindowPos(3);
+    const HWND controls[] = {st->progress, st->activityLabel, st->activityPanel};
+    for (HWND control : controls) {
+        if (!control) continue;
+        if (!deferred) break;
+        deferred = DeferWindowPos(
+            deferred, control, nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                SWP_HIDEWINDOW | SWP_NOREDRAW);
+    }
+    const bool hiddenAsBatch = deferred && EndDeferWindowPos(deferred);
+    if (!hiddenAsBatch) {
+        for (HWND control : controls) {
+            if (control) ShowWindow(control, SW_HIDE);
+        }
+    }
+    if (st->progress) SendMessageW(st->progress, PBM_SETMARQUEE, FALSE, 0);
+    RedrawWindow(owner, IsRectEmpty(&dirty) ? nullptr : &dirty, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 void addComboItem(HWND combo, const wchar_t* text) {
@@ -939,6 +1076,37 @@ void createControls(HWND hwnd, BarcodeState* st) {
     }
 
     st->status = leftLabel(hwnd, L"", S(116), S(92), S(900), S(24));
+    SetWindowLongPtrW(st->status, GWL_STYLE,
+                      GetWindowLongPtrW(st->status, GWL_STYLE) | SS_NOTIFY);
+    st->activityPanel = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"",
+                                        WS_CHILD,
+                                        S(500), S(260), S(400), S(96), hwnd,
+                                        win32_control_id(IDC_ACTIVITY_PANEL), GetModuleHandleW(nullptr), nullptr);
+    st->activityLabel = CreateWindowExW(0, L"STATIC", L"",
+                                        WS_CHILD | SS_LEFT | SS_CENTERIMAGE,
+                                        S(568), S(278), S(312), S(26), hwnd,
+                                        win32_control_id(IDC_ACTIVITY_LABEL), GetModuleHandleW(nullptr), nullptr);
+    st->progress = CreateWindowExW(0, PROGRESS_CLASSW, L"",
+                                   WS_CHILD | PBS_SMOOTH | PBS_MARQUEE,
+                                   S(568), S(315), S(312), S(16), hwnd,
+                                   win32_control_id(IDC_PROGRESS), GetModuleHandleW(nullptr), nullptr);
+    st->tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                  WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                                  hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (st->tooltip) {
+        SetWindowPos(st->tooltip, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SendMessageW(st->tooltip, TTM_SETMAXTIPWIDTH, 0, S(420));
+        addTooltip(st->tooltip, st->query, L"按当前筛选条件查询全部已签收条码；输入框中可按 Enter 查询。");
+        addTooltip(st->tooltip, st->refresh, L"使用当前条件重新查询并刷新全部结果。");
+        addTooltip(st->tooltip, st->exportExcel, L"导出当前已加载、已排序的全部结果，不会只导出可见行。");
+        addTooltip(st->tooltip, st->room, L"可选择全部或多个检验专业组；F4 或 Alt+向下键可打开。");
+        addTooltip(st->tooltip, st->machineStatus, L"可组合选择未上机、未审核、未发送或发送完成状态。");
+        addTooltip(st->tooltip, st->list, L"右键复制完整单元格内容；双击已上机记录可跳转常规报告。");
+        addTooltip(st->tooltip, st->progress, L"显示当前查询或全量导出的执行进度。");
+        addTooltip(st->tooltip, st->status, L"显示当前操作状态；红色错误提示可点击查看完整详情。");
+    }
 
     fillStaticCombos(st);
     setToday(st->startDate, false);
@@ -959,10 +1127,11 @@ void layout(HWND hwnd, BarcodeState* st) {
     const int clientW = static_cast<int>(rc.right);
     const int clientH = static_cast<int>(rc.bottom);
     MoveWindow(st->status, S(116), S(92),
-               (std::max)(S(300), clientW - S(124)), S(24), TRUE);
+               (std::max)(S(300), clientW - S(128)), S(24), TRUE);
     MoveWindow(st->list, S(4), listTop,
                (std::max)(S(300), clientW - S(8)),
                (std::max)(S(160), clientH - listTop - S(4)), TRUE);
+    positionActivity(hwnd, st);
 }
 
 const std::string& barcodeSortValue(const search::BarcodeQueryRow& row, int col) {
@@ -1237,7 +1406,7 @@ void showCellContextMenu(HWND hwnd, BarcodeState* st) {
     if (copyTextToClipboard(hwnd, text)) {
         setStatus(st, L"已复制单元格：" + std::wstring(BARCODE_COLUMNS[hit.iSubItem].title));
     } else {
-        setStatus(st, L"复制单元格失败。");
+        showAlert(st, L"复制单元格失败，请稍后重试。");
     }
 }
 
@@ -1274,6 +1443,7 @@ void runQuery(HWND hwnd, BarcodeState* st) {
     st->querying = true;
     updateActionButtons(st);
     setStatus(st, L"正在查询...");
+    showQueryActivity(hwnd, st);
 
     if (st->bgThread.joinable()) st->bgThread.join();
     st->bgThread = std::thread([hwnd, filters]() {
@@ -1310,9 +1480,9 @@ void runQuery(HWND hwnd, BarcodeState* st) {
 
 void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult> result) {
     st->querying = false;
+    hideActivity(hwnd, st);
     if (!result->ok) {
-        setStatus(st, L"查询失败。");
-        MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
+        showAlert(st, L"查询失败：" + search::utf8_to_wide(result->error));
         updateActionButtons(st);
         return;
     }
@@ -1343,7 +1513,7 @@ bool writeBytes(FILE* file, const std::string& text) {
 void exportRowsCsv(HWND hwnd, BarcodeState* st) {
     if (!st || st->querying || st->exporting) return;
     if (st->rows.empty()) {
-        MessageBoxW(hwnd, L"当前没有可导出的条码记录。", WINDOW_TITLE, MB_ICONINFORMATION);
+        showAlert(st, L"当前没有可导出的条码记录。");
         return;
     }
 
@@ -1355,6 +1525,7 @@ void exportRowsCsv(HWND hwnd, BarcodeState* st) {
     st->cancelExport.store(false);
     updateActionButtons(st);
     setStatus(st, L"正在导出全部 " + std::to_wstring(st->displayOrder.size()) + L" 条记录...");
+    showExportActivity(hwnd, st, st->displayOrder.size());
 
     const std::vector<size_t> exportOrder = st->displayOrder;
     st->exportThread = std::thread([hwnd, st, path, exportOrder]() {
@@ -1461,6 +1632,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             SetPropW(hwnd, PROP_STATE, reinterpret_cast<HANDLE>(st));
             st->bgBrush = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
+            st->alertBrush = CreateSolidBrush(COLOR_ALERT_BACKGROUND);
+            st->activityBrush = CreateSolidBrush(COLOR_ACTIVITY_BACKGROUND);
             createControls(hwnd, st);
             layout(hwnd, st);
             return 0;
@@ -1507,6 +1680,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_EXPORT:
                     exportRowsCsv(hwnd, st);
                     return 0;
+                case IDC_STATUS:
+                    if (HIWORD(wp) == STN_CLICKED && !st->lastAlertText.empty()) {
+                        MessageBoxW(hwnd, st->lastAlertText.c_str(), L"错误详情",
+                                    MB_OK | MB_ICONERROR);
+                    }
+                    return 0;
             }
             break;
         case WM_BARCODE_LOADED:
@@ -1519,6 +1698,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_BARCODE_EXPORT_PROGRESS:
             if (st && st->exporting) {
+                if (st->progress) {
+                    SendMessageW(st->progress, PBM_SETPOS,
+                                 static_cast<WPARAM>((std::min)(
+                                     static_cast<size_t>(wp), static_cast<size_t>(INT_MAX))), 0);
+                }
                 setStatus(st, L"正在导出全部记录：" + std::to_wstring(static_cast<size_t>(wp)) +
                               L" / " + std::to_wstring(static_cast<size_t>(lp)) + L"...");
             }
@@ -1528,20 +1712,17 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 std::unique_ptr<BarcodeExportResult> result(reinterpret_cast<BarcodeExportResult*>(lp));
                 if (st->exportThread.joinable()) st->exportThread.join();
                 st->exporting = false;
+                hideActivity(hwnd, st);
                 updateActionButtons(st);
                 LOG_DEBUG("barcode export timing: elapsed_ms=" + std::to_string(result->elapsedMs) +
                           ", rows=" + std::to_string(result->rowCount));
                 if (result->canceled) {
                     setStatus(st, L"导出已取消。");
                 } else if (!result->ok) {
-                    setStatus(st, L"导出失败。");
-                    MessageBoxW(hwnd, result->error.c_str(), WINDOW_TITLE, MB_ICONERROR);
+                    showAlert(st, L"导出失败：" + result->error);
                 } else {
                     setStatus(st, L"已导出全部 " + std::to_wstring(result->rowCount) +
                                   L" 条记录：" + result->path);
-                    MessageBoxW(hwnd, (L"已导出全部 " + std::to_wstring(result->rowCount) +
-                                       L" 条记录：\n" + result->path).c_str(),
-                                WINDOW_TITLE, MB_ICONINFORMATION);
                 }
             } else {
                 delete reinterpret_cast<BarcodeExportResult*>(lp);
@@ -1590,7 +1771,19 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_CTLCOLORSTATIC:
             if (st) {
-                SetBkColor(reinterpret_cast<HDC>(wp), GetSysColor(COLOR_BTNFACE));
+                HDC hdc = reinterpret_cast<HDC>(wp);
+                HWND control = reinterpret_cast<HWND>(lp);
+                if (control == st->status && st->statusIsAlert) {
+                    SetTextColor(hdc, COLOR_ALERT_TEXT);
+                    SetBkColor(hdc, COLOR_ALERT_BACKGROUND);
+                    return reinterpret_cast<LRESULT>(st->alertBrush);
+                }
+                if (control == st->activityPanel || control == st->activityLabel) {
+                    SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+                    SetBkColor(hdc, COLOR_ACTIVITY_BACKGROUND);
+                    return reinterpret_cast<LRESULT>(st->activityBrush);
+                }
+                SetBkColor(hdc, GetSysColor(COLOR_BTNFACE));
                 return reinterpret_cast<LRESULT>(st->bgBrush);
             }
             break;
@@ -1601,6 +1794,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (st->bgThread.joinable()) st->bgThread.join();
                 if (st->exportThread.joinable()) st->exportThread.join();
                 if (st->bgBrush) DeleteObject(st->bgBrush);
+                if (st->alertBrush) DeleteObject(st->alertBrush);
+                if (st->activityBrush) DeleteObject(st->activityBrush);
                 delete st;
             }
             break;
