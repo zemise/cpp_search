@@ -18,12 +18,13 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -37,6 +38,8 @@ constexpr const wchar_t* CHECK_DROPDOWN_CLASS = L"BarcodeCheckDropdown";
 constexpr const wchar_t* WINDOW_TITLE = L"已签收条码查询";
 constexpr const wchar_t* PROP_STATE = L"BarcodeSt";
 constexpr UINT WM_BARCODE_LOADED = WM_APP + 501;
+constexpr UINT WM_BARCODE_EXPORTED = WM_APP + 502;
+constexpr UINT WM_BARCODE_EXPORT_PROGRESS = WM_APP + 503;
 
 constexpr int IDC_DATE_FIELD = 4101;
 constexpr int IDC_START_DATE = 4102;
@@ -96,6 +99,7 @@ struct BarcodeState {
     std::vector<search::RoomOption> allRooms;
     std::vector<search::RoomOption> rooms;
     std::vector<search::BarcodeQueryRow> rows;
+    std::vector<size_t> displayOrder;
     std::vector<std::string> selectedRoomCodes;
     std::vector<std::string> selectedMachineStatuses;
     bool roomDropdownOpen = false;
@@ -103,12 +107,25 @@ struct BarcodeState {
     int listSortColumn = -1;
     bool listSortAscending = true;
     std::thread bgThread;
+    std::thread exportThread;
+    std::atomic_bool cancelExport{false};
+    bool querying = false;
+    bool exporting = false;
 };
 
 struct BarcodeQueryResult {
     bool ok = false;
     std::string error;
     std::vector<search::BarcodeQueryRow> rows;
+};
+
+struct BarcodeExportResult {
+    bool ok = false;
+    bool canceled = false;
+    std::wstring path;
+    std::wstring error;
+    size_t rowCount = 0;
+    long long elapsedMs = 0;
 };
 
 struct ListColumn {
@@ -913,7 +930,8 @@ void createControls(HWND hwnd, BarcodeState* st) {
                                  GetModuleHandleW(nullptr), nullptr);
 
     st->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
+                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL |
+                                   LVS_OWNERDATA,
                                S(4), S(120), S(1240), S(420), hwnd, win32_control_id(IDC_LIST), GetModuleHandleW(nullptr), nullptr);
     ListView_SetExtendedListViewStyle(st->list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
     for (const auto& column : BARCODE_COLUMNS) {
@@ -945,62 +963,6 @@ void layout(HWND hwnd, BarcodeState* st) {
     MoveWindow(st->list, S(4), listTop,
                (std::max)(S(300), clientW - S(8)),
                (std::max)(S(160), clientH - listTop - S(4)), TRUE);
-}
-
-void setCell(HWND list, int row, int col, const std::string& text) {
-    const auto wide = search::utf8_to_wide(text);
-    ListView_SetItemText(list, row, col, const_cast<wchar_t*>(wide.c_str()));
-}
-
-void insertRow(HWND list, int index, const search::BarcodeQueryRow& row,
-               bool hideRepeatedBarcodeFields) {
-    LVITEMW item{};
-    item.mask = LVIF_TEXT;
-    item.iItem = index;
-    wchar_t first[] = L"";
-    item.pszText = first;
-    ListView_InsertItem(list, &item);
-    const std::string* cells[] = {
-        &row.sample_no,
-        &row.emergency,
-        &row.barcode,
-        &row.reg_no,
-        &row.type_name,
-        &row.name,
-        &row.sex,
-        &row.dept_name,
-        &row.bed_no,
-        &row.receiver,
-        &row.receive_time,
-        &row.order_text,
-        &row.sample_name,
-        &row.tester,
-        &row.reviewer,
-        &row.review_time,
-        &row.review_elapsed,
-        &row.machine_status,
-        &row.fee,
-        &row.request_doctor,
-        &row.status,
-        &row.note,
-        &row.reason,
-        &row.submitter,
-        &row.submit_time,
-        &row.request_time,
-        &row.cancel_time,
-        &row.cancel_operator,
-        &row.hzid,
-    };
-    static_assert(sizeof(cells) / sizeof(cells[0]) ==
-                  sizeof(BARCODE_COLUMNS) / sizeof(BARCODE_COLUMNS[0]),
-                  "Barcode columns and row cells must stay aligned");
-    const int cellCount = static_cast<int>(sizeof(cells) / sizeof(cells[0]));
-    for (int col = 0; col < cellCount; ++col) {
-        const bool sharedBarcodeColumn =
-            col >= FIRST_SHARED_BARCODE_COLUMN && col <= LAST_SHARED_BARCODE_COLUMN;
-        const bool hideCell = hideRepeatedBarcodeFields && sharedBarcodeColumn;
-        setCell(list, index, col, hideCell ? std::string() : *cells[col]);
-    }
 }
 
 const std::string& barcodeSortValue(const search::BarcodeQueryRow& row, int col) {
@@ -1082,9 +1044,12 @@ std::string barcodeRowKey(const search::BarcodeQueryRow& row) {
     return row.barcode + "|" + row.sample_no + "|" + row.reg_no + "|" + row.order_text;
 }
 
-void updateExportButton(BarcodeState* st) {
-    if (!st || !st->exportExcel) return;
-    EnableWindow(st->exportExcel, !st->rows.empty());
+void updateActionButtons(BarcodeState* st) {
+    if (!st) return;
+    const bool idle = !st->querying && !st->exporting;
+    if (st->query) EnableWindow(st->query, idle);
+    if (st->refresh) EnableWindow(st->refresh, idle);
+    if (st->exportExcel) EnableWindow(st->exportExcel, idle && !st->rows.empty());
 }
 
 std::string barcodeGroupKey(const search::BarcodeQueryRow& row) {
@@ -1097,21 +1062,45 @@ bool sameNonEmptyBarcodeGroup(const search::BarcodeQueryRow& left,
     return !leftKey.empty() && leftKey == barcodeGroupKey(right);
 }
 
-void groupBarcodeRowsForDisplay(std::vector<search::BarcodeQueryRow>& rows) {
+const search::BarcodeQueryRow* displayedRow(const BarcodeState* st, int displayIndex) {
+    if (!st || displayIndex < 0 ||
+        displayIndex >= static_cast<int>(st->displayOrder.size())) {
+        return nullptr;
+    }
+    const size_t rowIndex = st->displayOrder[static_cast<size_t>(displayIndex)];
+    if (rowIndex >= st->rows.size()) return nullptr;
+    return &st->rows[rowIndex];
+}
+
+const std::string& displayedCellValue(const BarcodeState* st, int displayIndex, int column) {
+    static const std::string empty;
+    const auto* row = displayedRow(st, displayIndex);
+    if (!row) return empty;
+    if (column >= FIRST_SHARED_BARCODE_COLUMN && column <= LAST_SHARED_BARCODE_COLUMN &&
+        displayIndex > 0) {
+        const auto* previous = displayedRow(st, displayIndex - 1);
+        if (previous && sameNonEmptyBarcodeGroup(*previous, *row)) return empty;
+    }
+    return barcodeSortValue(*row, column);
+}
+
+void groupBarcodeRowsForDisplay(BarcodeState* st) {
+    if (!st) return;
     struct BarcodeRowGroup {
-        std::vector<search::BarcodeQueryRow> rows;
+        std::vector<size_t> rowIndexes;
     };
 
     std::vector<BarcodeRowGroup> groups;
-    groups.reserve(rows.size());
+    groups.reserve(st->displayOrder.size());
     std::unordered_map<std::string, size_t> groupIndexes;
-    groupIndexes.reserve(rows.size());
+    groupIndexes.reserve(st->displayOrder.size());
 
-    for (auto& row : rows) {
+    for (const size_t rowIndex : st->displayOrder) {
+        const auto& row = st->rows[rowIndex];
         const std::string barcode = barcodeGroupKey(row);
         if (barcode.empty()) {
             BarcodeRowGroup group;
-            group.rows.push_back(std::move(row));
+            group.rowIndexes.push_back(rowIndex);
             groups.push_back(std::move(group));
             continue;
         }
@@ -1120,46 +1109,45 @@ void groupBarcodeRowsForDisplay(std::vector<search::BarcodeQueryRow>& rows) {
         if (inserted.second) {
             groups.push_back(BarcodeRowGroup{});
         }
-        groups[inserted.first->second].rows.push_back(std::move(row));
+        groups[inserted.first->second].rowIndexes.push_back(rowIndex);
     }
 
-    rows.clear();
+    st->displayOrder.clear();
     for (auto& group : groups) {
-        for (auto& row : group.rows) {
-            rows.push_back(std::move(row));
+        for (const size_t rowIndex : group.rowIndexes) {
+            st->displayOrder.push_back(rowIndex);
         }
     }
 }
 
 void sortBarcodeRowsForDisplay(BarcodeState* st) {
     if (!st) return;
+    st->displayOrder.resize(st->rows.size());
+    for (size_t i = 0; i < st->rows.size(); ++i) st->displayOrder[i] = i;
     if (st->listSortColumn >= FIRST_DATA_COLUMN && st->listSortColumn <= LAST_DATA_COLUMN) {
         const int col = st->listSortColumn;
         const bool ascending = st->listSortAscending;
-        std::stable_sort(st->rows.begin(), st->rows.end(),
-                         [col, ascending](const auto& a, const auto& b) {
-                             const int cmp = compareBarcodeSortValue(a, b, col);
+        std::stable_sort(st->displayOrder.begin(), st->displayOrder.end(),
+                         [st, col, ascending](const size_t a, const size_t b) {
+                             const int cmp = compareBarcodeSortValue(st->rows[a], st->rows[b], col);
                              return ascending ? cmp < 0 : cmp > 0;
                          });
     }
-    groupBarcodeRowsForDisplay(st->rows);
+    groupBarcodeRowsForDisplay(st);
 }
 
 void presentRows(BarcodeState* st) {
     if (!st || !st->list) return;
     SendMessageW(st->list, WM_SETREDRAW, FALSE, 0);
-    ListView_DeleteAllItems(st->list);
-    for (size_t i = 0; i < st->rows.size(); ++i) {
-        const bool repeatedBarcode = i > 0 &&
-            sameNonEmptyBarcodeGroup(st->rows[i - 1], st->rows[i]);
-        insertRow(st->list, static_cast<int>(i), st->rows[i], repeatedBarcode);
-    }
+    ListView_SetItemCountEx(st->list, static_cast<int>(st->displayOrder.size()),
+                            LVSICF_NOINVALIDATEALL);
     SendMessageW(st->list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(st->list, nullptr, TRUE);
 }
 
 void sortRowsByColumn(BarcodeState* st, int col) {
-    if (!st || !st->list || st->rows.empty() || col < FIRST_DATA_COLUMN || col > LAST_DATA_COLUMN) return;
+    if (!st || !st->list || st->rows.empty() || st->exporting ||
+        col < FIRST_DATA_COLUMN || col > LAST_DATA_COLUMN) return;
     if (st->listSortColumn == col) {
         st->listSortAscending = !st->listSortAscending;
     } else {
@@ -1169,16 +1157,17 @@ void sortRowsByColumn(BarcodeState* st, int col) {
 
     std::string selectedKey;
     const int selected = ListView_GetNextItem(st->list, -1, LVNI_SELECTED);
-    if (selected >= 0 && selected < static_cast<int>(st->rows.size())) {
-        selectedKey = barcodeRowKey(st->rows[static_cast<size_t>(selected)]);
+    if (const auto* row = displayedRow(st, selected)) {
+        selectedKey = barcodeRowKey(*row);
     }
 
     sortBarcodeRowsForDisplay(st);
     presentRows(st);
 
     if (!selectedKey.empty()) {
-        for (int i = 0; i < static_cast<int>(st->rows.size()); ++i) {
-            if (barcodeRowKey(st->rows[static_cast<size_t>(i)]) == selectedKey) {
+        for (int i = 0; i < static_cast<int>(st->displayOrder.size()); ++i) {
+            const auto* row = displayedRow(st, i);
+            if (row && barcodeRowKey(*row) == selectedKey) {
                 ListView_SetItemState(st->list, i, LVIS_SELECTED | LVIS_FOCUSED,
                                       LVIS_SELECTED | LVIS_FOCUSED);
                 ListView_EnsureVisible(st->list, i, FALSE);
@@ -1189,8 +1178,9 @@ void sortRowsByColumn(BarcodeState* st, int col) {
 }
 
 void openRegularReportForRow(HWND owner, BarcodeState* st, int index) {
-    if (!st || index < 0 || index >= static_cast<int>(st->rows.size())) return;
-    const auto& row = st->rows[static_cast<size_t>(index)];
+    const auto* displayed = displayedRow(st, index);
+    if (!displayed) return;
+    const auto& row = *displayed;
     if (search::trim(row.report_no).empty() || search::trim(row.machine_code).empty() ||
         search::trim(row.inspect_date).empty()) {
         MessageBoxW(owner, L"该条码为已签收未上机，无法跳转到常规报告。", WINDOW_TITLE, MB_ICONINFORMATION);
@@ -1222,7 +1212,7 @@ void showCellContextMenu(HWND hwnd, BarcodeState* st) {
     LVHITTESTINFO hit{};
     hit.pt = listPt;
     const int row = ListView_SubItemHitTest(st->list, &hit);
-    if (row < 0 || row >= static_cast<int>(st->rows.size()) ||
+    if (row < 0 || row >= static_cast<int>(st->displayOrder.size()) ||
         hit.iSubItem < FIRST_DATA_COLUMN || hit.iSubItem > LAST_DATA_COLUMN) {
         return;
     }
@@ -1231,8 +1221,9 @@ void showCellContextMenu(HWND hwnd, BarcodeState* st) {
     ListView_SetItemState(st->list, row, LVIS_SELECTED | LVIS_FOCUSED,
                           LVIS_SELECTED | LVIS_FOCUSED);
 
-    const std::wstring text = search::utf8_to_wide(
-        barcodeSortValue(st->rows[static_cast<size_t>(row)], hit.iSubItem));
+    const auto* displayed = displayedRow(st, row);
+    if (!displayed) return;
+    const std::wstring text = search::utf8_to_wide(barcodeSortValue(*displayed, hit.iSubItem));
     const std::wstring menuLabel = search::copy_menu_label(text);
 
     HMENU menu = CreatePopupMenu();
@@ -1274,11 +1265,14 @@ search::BarcodeQueryFilters collectFilters(BarcodeState* st) {
 }
 
 void runQuery(HWND hwnd, BarcodeState* st) {
+    if (!st || st->querying || st->exporting) return;
     if (search::build_connection_string_w(st->ctx.dbSettings).empty()) {
         MessageBoxW(hwnd, L"请先在系统设置中配置数据库连接。", WINDOW_TITLE, MB_ICONWARNING);
         return;
     }
     auto filters = collectFilters(st);
+    st->querying = true;
+    updateActionButtons(st);
     setStatus(st, L"正在查询...");
 
     if (st->bgThread.joinable()) st->bgThread.join();
@@ -1298,17 +1292,28 @@ void runQuery(HWND hwnd, BarcodeState* st) {
                 LOG_WARN("PostMessageW WM_BARCODE_LOADED failed");
                 delete result;
             }
+        } catch (const std::exception& ex) {
+            auto* result = new BarcodeQueryResult;
+            result->error = std::string("Barcode query thread failed: ") + ex.what();
+            if (!PostMessageW(hwnd, WM_BARCODE_LOADED, 0, reinterpret_cast<LPARAM>(result))) {
+                delete result;
+            }
         } catch (...) {
-            LOG_ERROR("Barcode query thread crashed");
+            auto* result = new BarcodeQueryResult;
+            result->error = "Barcode query thread failed unexpectedly.";
+            if (!PostMessageW(hwnd, WM_BARCODE_LOADED, 0, reinterpret_cast<LPARAM>(result))) {
+                delete result;
+            }
         }
     });
 }
 
 void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult> result) {
+    st->querying = false;
     if (!result->ok) {
         setStatus(st, L"查询失败。");
         MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
-        updateExportButton(st);
+        updateActionButtons(st);
         return;
     }
     st->rows = std::move(result->rows);
@@ -1324,15 +1329,20 @@ void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult
     LOG_DEBUG("barcode UI timing: sort_ms=" + std::to_string(sort_ms) +
               ", listview_ms=" + std::to_string(list_ms) +
               ", rows=" + std::to_string(st->rows.size()));
-    updateExportButton(st);
+    updateActionButtons(st);
     setStatus(st, L"查询完成：院区 " + search::utf8_to_wide(comboText(st->campus)) +
               L"，专业组 " + roomSummary(st) +
               L"，上机状态 " + statusSummary(st) +
               L"，共 " + std::to_wstring(st->rows.size()) + L" 条。");
 }
 
+bool writeBytes(FILE* file, const std::string& text) {
+    return text.empty() || fwrite(text.data(), 1, text.size(), file) == text.size();
+}
+
 void exportRowsCsv(HWND hwnd, BarcodeState* st) {
-    if (!st || st->rows.empty()) {
+    if (!st || st->querying || st->exporting) return;
+    if (st->rows.empty()) {
         MessageBoxW(hwnd, L"当前没有可导出的条码记录。", WINDOW_TITLE, MB_ICONINFORMATION);
         return;
     }
@@ -1340,40 +1350,95 @@ void exportRowsCsv(HWND hwnd, BarcodeState* st) {
     std::wstring path;
     if (!chooseExportPath(hwnd, st, path)) return;
 
-    FILE* file = nullptr;
+    if (st->exportThread.joinable()) st->exportThread.join();
+    st->exporting = true;
+    st->cancelExport.store(false);
+    updateActionButtons(st);
+    setStatus(st, L"正在导出全部 " + std::to_wstring(st->displayOrder.size()) + L" 条记录...");
+
+    const std::vector<size_t> exportOrder = st->displayOrder;
+    st->exportThread = std::thread([hwnd, st, path, exportOrder]() {
+        const auto started = std::chrono::steady_clock::now();
+        auto* result = new BarcodeExportResult;
+        result->path = path;
+        const std::wstring temporaryPath = path + L".lis-export.tmp";
+        DeleteFileW(temporaryPath.c_str());
+
+        FILE* file = nullptr;
+        try {
 #ifdef _MSC_VER
-    _wfopen_s(&file, path.c_str(), L"wb");
+            _wfopen_s(&file, temporaryPath.c_str(), L"wb");
 #else
-    file = _wfopen(path.c_str(), L"wb");
+            file = _wfopen(temporaryPath.c_str(), L"wb");
 #endif
-    if (!file) {
-        MessageBoxW(hwnd, L"导出文件创建失败，请确认目标位置可写。", WINDOW_TITLE, MB_ICONERROR);
-        return;
-    }
+            bool writeOk = file != nullptr;
+            if (!file) {
+                result->error = L"导出文件创建失败，请确认目标位置可写。";
+            } else {
+                std::string line = "\xEF\xBB\xBF";
+                bool firstColumn = true;
+                for (const auto& column : BARCODE_COLUMNS) {
+                    if (column.index < FIRST_DATA_COLUMN || column.index > LAST_DATA_COLUMN) continue;
+                    if (!firstColumn) line.push_back(',');
+                    firstColumn = false;
+                    line += csvEscape(search::wide_to_utf8(column.title));
+                }
+                line.push_back('\n');
+                writeOk = writeBytes(file, line);
 
-    std::ostringstream csv;
-    csv << "\xEF\xBB\xBF";
-    bool firstColumn = true;
-    for (const auto& column : BARCODE_COLUMNS) {
-        if (column.index < FIRST_DATA_COLUMN || column.index > LAST_DATA_COLUMN) continue;
-        if (!firstColumn) csv << ',';
-        firstColumn = false;
-        csv << csvEscape(search::wide_to_utf8(column.title));
-    }
-    csv << '\n';
-    for (const auto& row : st->rows) {
-        for (int col = FIRST_DATA_COLUMN; col <= LAST_DATA_COLUMN; ++col) {
-            if (col > FIRST_DATA_COLUMN) csv << ',';
-            csv << csvEscape(barcodeSortValue(row, col));
+                for (size_t i = 0; writeOk && i < exportOrder.size(); ++i) {
+                    if (st->cancelExport.load()) {
+                        result->canceled = true;
+                        break;
+                    }
+                    const size_t rowIndex = exportOrder[i];
+                    if (rowIndex >= st->rows.size()) continue;
+                    const auto& row = st->rows[rowIndex];
+                    line.clear();
+                    for (int col = FIRST_DATA_COLUMN; col <= LAST_DATA_COLUMN; ++col) {
+                        if (col > FIRST_DATA_COLUMN) line.push_back(',');
+                        line += csvEscape(barcodeSortValue(row, col));
+                    }
+                    line.push_back('\n');
+                    writeOk = writeBytes(file, line);
+                    if (writeOk) result->rowCount = i + 1;
+                    if ((i + 1) % 5000 == 0) {
+                        PostMessageW(hwnd, WM_BARCODE_EXPORT_PROGRESS,
+                                     static_cast<WPARAM>(i + 1),
+                                     static_cast<LPARAM>(exportOrder.size()));
+                    }
+                }
+                if (fclose(file) != 0) writeOk = false;
+                file = nullptr;
+            }
+
+            if (result->canceled) {
+                DeleteFileW(temporaryPath.c_str());
+            } else if (!writeOk) {
+                DeleteFileW(temporaryPath.c_str());
+                if (result->error.empty()) result->error = L"写入导出文件失败。";
+            } else if (!MoveFileExW(temporaryPath.c_str(), path.c_str(),
+                                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                DeleteFileW(temporaryPath.c_str());
+                result->error = L"导出文件保存失败。";
+            } else {
+                result->ok = true;
+            }
+        } catch (const std::exception& ex) {
+            if (file) fclose(file);
+            DeleteFileW(temporaryPath.c_str());
+            result->error = L"导出失败：" + search::utf8_to_wide(ex.what());
+        } catch (...) {
+            if (file) fclose(file);
+            DeleteFileW(temporaryPath.c_str());
+            result->error = L"导出过程中发生未知错误。";
         }
-        csv << '\n';
-    }
-    const std::string text = csv.str();
-    fwrite(text.data(), 1, text.size(), file);
-    fclose(file);
-
-    setStatus(st, L"已导出条码记录：" + path);
-    MessageBoxW(hwnd, (L"已导出条码记录：\n" + path).c_str(), WINDOW_TITLE, MB_ICONINFORMATION);
+        result->elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        if (!PostMessageW(hwnd, WM_BARCODE_EXPORTED, 0, reinterpret_cast<LPARAM>(result))) {
+            delete result;
+        }
+    });
 }
 
 COLORREF rowColor(const search::BarcodeQueryRow& row) {
@@ -1452,9 +1517,49 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 delete reinterpret_cast<BarcodeQueryResult*>(lp);
             }
             return 0;
+        case WM_BARCODE_EXPORT_PROGRESS:
+            if (st && st->exporting) {
+                setStatus(st, L"正在导出全部记录：" + std::to_wstring(static_cast<size_t>(wp)) +
+                              L" / " + std::to_wstring(static_cast<size_t>(lp)) + L"...");
+            }
+            return 0;
+        case WM_BARCODE_EXPORTED:
+            if (st) {
+                std::unique_ptr<BarcodeExportResult> result(reinterpret_cast<BarcodeExportResult*>(lp));
+                if (st->exportThread.joinable()) st->exportThread.join();
+                st->exporting = false;
+                updateActionButtons(st);
+                LOG_DEBUG("barcode export timing: elapsed_ms=" + std::to_string(result->elapsedMs) +
+                          ", rows=" + std::to_string(result->rowCount));
+                if (result->canceled) {
+                    setStatus(st, L"导出已取消。");
+                } else if (!result->ok) {
+                    setStatus(st, L"导出失败。");
+                    MessageBoxW(hwnd, result->error.c_str(), WINDOW_TITLE, MB_ICONERROR);
+                } else {
+                    setStatus(st, L"已导出全部 " + std::to_wstring(result->rowCount) +
+                                  L" 条记录：" + result->path);
+                    MessageBoxW(hwnd, (L"已导出全部 " + std::to_wstring(result->rowCount) +
+                                       L" 条记录：\n" + result->path).c_str(),
+                                WINDOW_TITLE, MB_ICONINFORMATION);
+                }
+            } else {
+                delete reinterpret_cast<BarcodeExportResult*>(lp);
+            }
+            return 0;
         case WM_NOTIFY:
             if (st) {
                 auto* nm = reinterpret_cast<NMHDR*>(lp);
+                if (nm->idFrom == IDC_LIST && nm->code == LVN_GETDISPINFOW) {
+                    auto* info = reinterpret_cast<NMLVDISPINFOW*>(lp);
+                    if ((info->item.mask & LVIF_TEXT) && info->item.pszText &&
+                        info->item.cchTextMax > 0) {
+                        const auto text = search::utf8_to_wide(
+                            displayedCellValue(st, info->item.iItem, info->item.iSubItem));
+                        lstrcpynW(info->item.pszText, text.c_str(), info->item.cchTextMax);
+                    }
+                    return 0;
+                }
                 if (nm->idFrom == IDC_LIST && nm->code == LVN_COLUMNCLICK) {
                     auto* clicked = reinterpret_cast<NMLISTVIEW*>(lp);
                     sortRowsByColumn(st, clicked->iSubItem);
@@ -1474,8 +1579,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
                     if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
                         const int idx = static_cast<int>(cd->nmcd.dwItemSpec);
-                        if (idx >= 0 && idx < static_cast<int>(st->rows.size())) {
-                            cd->clrTextBk = rowColor(st->rows[static_cast<size_t>(idx)]);
+                        if (const auto* row = displayedRow(st, idx)) {
+                            cd->clrTextBk = rowColor(*row);
                             cd->clrText = RGB(0, 0, 0);
                         }
                         return CDRF_NEWFONT;
@@ -1492,7 +1597,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY:
             RemovePropW(hwnd, PROP_STATE);
             if (st) {
+                st->cancelExport.store(true);
                 if (st->bgThread.joinable()) st->bgThread.join();
+                if (st->exportThread.joinable()) st->exportThread.join();
                 if (st->bgBrush) DeleteObject(st->bgBrush);
                 delete st;
             }
