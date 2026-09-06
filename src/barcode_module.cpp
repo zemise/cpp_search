@@ -10,6 +10,7 @@
 #include "search_text.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "xlsx_writer.h"
 
 #include <commctrl.h>
 #include <uxtheme.h>
@@ -492,22 +493,6 @@ void registerLegendClass(HINSTANCE instance) {
     registered = true;
 }
 
-std::string csvEscape(const std::string& text) {
-    const bool quote = text.find_first_of(",\"\r\n") != std::string::npos;
-    std::string out;
-    out.reserve(text.size() + 2);
-    if (quote) out.push_back('"');
-    for (const char ch : text) {
-        if (ch == '"') {
-            out += "\"\"";
-        } else {
-            out.push_back(ch);
-        }
-    }
-    if (quote) out.push_back('"');
-    return out;
-}
-
 std::string sanitizeFilenamePart(std::string text) {
     text = search::trim(text);
     for (char& ch : text) {
@@ -540,7 +525,7 @@ std::wstring defaultExportFilename(BarcodeState* st) {
     if (!end.empty() && end != start) filename += "至" + end;
     const std::string campus = sanitizeFilenamePart(comboText(st->campus));
     if (!campus.empty()) filename += "-" + campus;
-    filename += ".csv";
+    filename += ".xlsx";
     return search::utf8_to_wide(filename);
 }
 
@@ -551,10 +536,10 @@ bool chooseExportPath(HWND owner, BarcodeState* st, std::wstring& path) {
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Excel 工作簿 (*.xlsx)\0*.xlsx\0所有文件 (*.*)\0*.*\0";
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"csv";
+    ofn.lpstrDefExt = L"xlsx";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     if (!GetSaveFileNameW(&ofn)) return false;
     path = buffer;
@@ -1100,7 +1085,7 @@ void createControls(HWND hwnd, BarcodeState* st) {
         SendMessageW(st->tooltip, TTM_SETMAXTIPWIDTH, 0, S(420));
         addTooltip(st->tooltip, st->query, L"按当前筛选条件查询全部已签收条码；输入框中可按 Enter 查询。");
         addTooltip(st->tooltip, st->refresh, L"使用当前条件重新查询并刷新全部结果。");
-        addTooltip(st->tooltip, st->exportExcel, L"导出当前已加载、已排序的全部结果，不会只导出可见行。");
+        addTooltip(st->tooltip, st->exportExcel, L"将当前已加载、已排序的全部结果导出为 Excel 工作簿，不会只导出可见行。");
         addTooltip(st->tooltip, st->room, L"可选择全部或多个检验专业组；F4 或 Alt+向下键可打开。");
         addTooltip(st->tooltip, st->machineStatus, L"可组合选择未上机、未审核、未发送或发送完成状态。");
         addTooltip(st->tooltip, st->list, L"右键复制完整单元格内容；双击已上机记录可跳转常规报告。");
@@ -1506,11 +1491,7 @@ void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult
               L"，共 " + std::to_wstring(st->rows.size()) + L" 条。");
 }
 
-bool writeBytes(FILE* file, const std::string& text) {
-    return text.empty() || fwrite(text.data(), 1, text.size(), file) == text.size();
-}
-
-void exportRowsCsv(HWND hwnd, BarcodeState* st) {
+void exportRowsXlsx(HWND hwnd, BarcodeState* st) {
     if (!st || st->querying || st->exporting) return;
     if (st->rows.empty()) {
         showAlert(st, L"当前没有可导出的条码记录。");
@@ -1546,41 +1527,38 @@ void exportRowsCsv(HWND hwnd, BarcodeState* st) {
             if (!file) {
                 result->error = L"导出文件创建失败，请确认目标位置可写。";
             } else {
-                std::string line = "\xEF\xBB\xBF";
-                bool firstColumn = true;
+                std::vector<std::string> headers;
+                headers.reserve(sizeof(BARCODE_COLUMNS) / sizeof(BARCODE_COLUMNS[0]));
                 for (const auto& column : BARCODE_COLUMNS) {
                     if (column.index < FIRST_DATA_COLUMN || column.index > LAST_DATA_COLUMN) continue;
-                    if (!firstColumn) line.push_back(',');
-                    firstColumn = false;
-                    line += csvEscape(search::wide_to_utf8(column.title));
+                    headers.push_back(search::wide_to_utf8(column.title));
                 }
-                line.push_back('\n');
-                writeOk = writeBytes(file, line);
-
-                for (size_t i = 0; writeOk && i < exportOrder.size(); ++i) {
-                    if (st->cancelExport.load()) {
-                        result->canceled = true;
-                        break;
-                    }
-                    const size_t rowIndex = exportOrder[i];
-                    if (rowIndex >= st->rows.size()) continue;
-                    const auto& row = st->rows[rowIndex];
-                    line.clear();
-                    for (int col = FIRST_DATA_COLUMN; col <= LAST_DATA_COLUMN; ++col) {
-                        if (col > FIRST_DATA_COLUMN) line.push_back(',');
-                        line += csvEscape(barcodeSortValue(row, col));
-                    }
-                    line.push_back('\n');
-                    writeOk = writeBytes(file, line);
-                    if (writeOk) result->rowCount = i + 1;
-                    if ((i + 1) % 5000 == 0) {
+                std::string exportError;
+                writeOk = search::write_xlsx(
+                    file, "已签收条码", headers, exportOrder.size(),
+                    [st, &exportOrder](size_t row, size_t column) -> std::string {
+                        if (row >= exportOrder.size()) return {};
+                        const size_t rowIndex = exportOrder[row];
+                        if (rowIndex >= st->rows.size()) return {};
+                        return barcodeSortValue(st->rows[rowIndex],
+                                                static_cast<int>(column) + FIRST_DATA_COLUMN);
+                    },
+                    [st]() { return st->cancelExport.load(); },
+                    [hwnd](size_t completed, size_t total) {
                         PostMessageW(hwnd, WM_BARCODE_EXPORT_PROGRESS,
-                                     static_cast<WPARAM>(i + 1),
-                                     static_cast<LPARAM>(exportOrder.size()));
-                    }
+                                     static_cast<WPARAM>(completed),
+                                     static_cast<LPARAM>(total));
+                    },
+                    result->rowCount, result->canceled, exportError);
+                if (fclose(file) != 0 && writeOk) {
+                    writeOk = false;
+                    exportError = "failed to flush XLSX file";
                 }
-                if (fclose(file) != 0) writeOk = false;
                 file = nullptr;
+                if (!writeOk && !result->canceled) {
+                    result->error = L"生成 Excel 工作簿失败：" +
+                                    search::utf8_to_wide(exportError);
+                }
             }
 
             if (result->canceled) {
@@ -1678,7 +1656,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     runQuery(hwnd, st);
                     return 0;
                 case IDC_EXPORT:
-                    exportRowsCsv(hwnd, st);
+                    exportRowsXlsx(hwnd, st);
                     return 0;
                 case IDC_STATUS:
                     if (HIWORD(wp) == STN_CLICKED && !st->lastAlertText.empty()) {

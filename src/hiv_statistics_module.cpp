@@ -10,6 +10,7 @@
 #include "search_text.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "xlsx_writer.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -615,22 +616,6 @@ void appendBytes(std::vector<unsigned char>& out, const std::string& text) {
     out.insert(out.end(), text.begin(), text.end());
 }
 
-std::string csvEscape(const std::string& text) {
-    const bool quote = text.find_first_of(",\"\r\n") != std::string::npos;
-    std::string out;
-    out.reserve(text.size() + 2);
-    if (quote) out.push_back('"');
-    for (const char ch : text) {
-        if (ch == '"') {
-            out += "\"\"";
-        } else {
-            out.push_back(ch);
-        }
-    }
-    if (quote) out.push_back('"');
-    return out;
-}
-
 void appendZipLocalHeader(std::vector<unsigned char>& out, const ZipEntry& entry) {
     appendLe32(out, 0x04034b50u);
     appendLe16(out, entry.versionNeeded);
@@ -820,32 +805,32 @@ void exportStatistics(HWND hwnd, HivStatisticsState* st) {
     MessageBoxW(hwnd, (L"已导出统计表：\n" + path).c_str(), WINDOW_TITLE, MB_ICONINFORMATION);
 }
 
-std::wstring defaultDetailCsvFilename(HivStatisticsState* st) {
+std::wstring defaultDetailXlsxFilename(HivStatisticsState* st) {
     const int year = intText(st->year, 0);
     const int month = selectedMonth(st->month);
     wchar_t name[160]{};
-    swprintf(name, 160, L"%04d年%d月HIV检测明细表%s.csv", year, month, sourceSuffix(st->source).c_str());
+    swprintf(name, 160, L"%04d年%d月HIV检测明细表%s.xlsx", year, month, sourceSuffix(st->source).c_str());
     return name;
 }
 
-bool chooseDetailCsvPath(HWND owner, HivStatisticsState* st, std::wstring& path) {
+bool chooseDetailXlsxPath(HWND owner, HivStatisticsState* st, std::wstring& path) {
     wchar_t buffer[MAX_PATH]{};
-    const std::wstring defaultName = defaultDetailCsvFilename(st);
+    const std::wstring defaultName = defaultDetailXlsxFilename(st);
     lstrcpynW(buffer, defaultName.c_str(), MAX_PATH);
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Excel 工作簿 (*.xlsx)\0*.xlsx\0所有文件 (*.*)\0*.*\0";
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"csv";
+    ofn.lpstrDefExt = L"xlsx";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     if (!GetSaveFileNameW(&ofn)) return false;
     path = buffer;
     return true;
 }
 
-std::string detailCsvValue(const search::HivStatDetailRow& row, int col) {
+std::string detailExportValue(const search::HivStatDetailRow& row, int col) {
     switch (col) {
         case DetailMachine: return row.machine_name.empty() ? row.mach_code : row.machine_name;
         case DetailSampleSource: return row.sample_source;
@@ -870,7 +855,7 @@ std::string detailCsvValue(const search::HivStatDetailRow& row, int col) {
     }
 }
 
-void exportDetailsCsv(HWND hwnd, HivStatisticsState* st) {
+void exportDetailsXlsx(HWND hwnd, HivStatisticsState* st) {
     if (!st || !st->hasLoadedResult) {
         MessageBoxW(hwnd, L"请先查询统计数据后再导出明细。", WINDOW_TITLE, MB_ICONWARNING);
         return;
@@ -881,24 +866,18 @@ void exportDetailsCsv(HWND hwnd, HivStatisticsState* st) {
     }
 
     std::wstring path;
-    if (!chooseDetailCsvPath(hwnd, st, path)) return;
+    if (!chooseDetailXlsxPath(hwnd, st, path)) return;
 
-    std::vector<unsigned char> bytes;
-    appendBytes(bytes, "\xEF\xBB\xBF");
+    std::vector<std::string> headers;
     for (int col = 0; col < static_cast<int>(std::size(DETAIL_COLUMNS)); ++col) {
-        if (col > 0) appendBytes(bytes, ",");
-        appendBytes(bytes, csvEscape(search::wide_to_utf8(DETAIL_COLUMNS[col].title)));
+        headers.push_back(search::wide_to_utf8(DETAIL_COLUMNS[col].title));
     }
-    appendBytes(bytes, "\n");
-    for (const auto& row : st->rows) {
-        for (int col = 0; col < static_cast<int>(std::size(DETAIL_COLUMNS)); ++col) {
-            if (col > 0) appendBytes(bytes, ",");
-            appendBytes(bytes, csvEscape(detailCsvValue(row, col)));
-        }
-        appendBytes(bytes, "\n");
-    }
-
-    if (!writeFileBytes(path, bytes)) {
+    std::string error;
+    if (!search::write_xlsx_file(
+            path, "HIV检测明细", headers, st->rows.size(),
+            [st](size_t row, size_t column) {
+                return detailExportValue(st->rows[row], static_cast<int>(column));
+            }, error)) {
         MessageBoxW(hwnd, L"导出明细表失败，请确认目标文件可写。", WINDOW_TITLE, MB_ICONERROR);
         return;
     }
@@ -1324,7 +1303,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (LOWORD(wp) == IDC_EXPORT_DETAILS) {
-                exportDetailsCsv(hwnd, st);
+                exportDetailsXlsx(hwnd, st);
                 return 0;
             }
             if (LOWORD(wp) == IDC_UPLOAD_TEMPLATE) {

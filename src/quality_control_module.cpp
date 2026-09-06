@@ -12,6 +12,7 @@
 #include "search_text.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "xlsx_writer.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -26,7 +27,6 @@
 #include <map>
 #include <memory>
 #include <set>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -54,7 +54,7 @@ enum ControlId {
     IDC_STATUS = 6809,
     IDC_ITEM_CODE = 6810,
     IDC_LEVEL = 6811,
-    IDC_EXPORT_CSV = 6812,
+    IDC_EXPORT_EXCEL = 6812,
     IDC_LJ_CHART = 6813,
     IDC_CHART_LIST = 6814,
     IDC_STATUS_FILTER = 6815,
@@ -2008,22 +2008,6 @@ void ensureCardWindowClass() {
     registered = true;
 }
 
-std::string csvEscape(const std::string& text) {
-    const bool quote = text.find_first_of(",\"\r\n") != std::string::npos;
-    std::string out;
-    out.reserve(text.size() + 2);
-    if (quote) out.push_back('"');
-    for (const char ch : text) {
-        if (ch == '"') {
-            out += "\"\"";
-        } else {
-            out.push_back(ch);
-        }
-    }
-    if (quote) out.push_back('"');
-    return out;
-}
-
 std::string sanitizeFilenamePart(std::string text) {
     text = search::trim(text);
     for (char& ch : text) {
@@ -2054,7 +2038,7 @@ std::wstring defaultExportFilename(State* st) {
     const std::string end = sanitizeFilenamePart(dateText(st->endDate));
     if (!start.empty()) filename += "-" + start;
     if (!end.empty() && end != start) filename += "-" + end;
-    filename += ".csv";
+    filename += ".xlsx";
     return search::utf8_to_wide(filename);
 }
 
@@ -2065,17 +2049,17 @@ bool chooseExportPath(HWND owner, State* st, std::wstring& path) {
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Excel 工作簿 (*.xlsx)\0*.xlsx\0所有文件 (*.*)\0*.*\0";
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"csv";
+    ofn.lpstrDefExt = L"xlsx";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     if (!GetSaveFileNameW(&ofn)) return false;
     path = buffer;
     return true;
 }
 
-void exportVisibleDetailsCsv(HWND hwnd, State* st) {
+void exportVisibleDetailsXlsx(HWND hwnd, State* st) {
     if (!st || st->busy) return;
     const auto rows = visibleDetails(st);
     if (rows.empty()) {
@@ -2086,39 +2070,35 @@ void exportVisibleDetailsCsv(HWND hwnd, State* st) {
     std::wstring path;
     if (!chooseExportPath(hwnd, st, path)) return;
 
-    FILE* file = nullptr;
-#ifdef _MSC_VER
-    _wfopen_s(&file, path.c_str(), L"wb");
-#else
-    file = _wfopen(path.c_str(), L"wb");
-#endif
-    if (!file) {
+    const std::vector<std::string> headers = {
+        "时间", "样本号", "报告号", "仪器", "检验者", "项目", "水平",
+        "批号", "结果", "单位", "状态", "规则", "Z值", "来源"};
+    std::string error;
+    if (!search::write_xlsx_file(
+            path, "质控明细", headers, rows.size(),
+            [&rows](size_t row_index, size_t column) -> std::string {
+                const auto& row = *rows[row_index];
+                switch (column) {
+                    case 0: return pointDisplayTime(row);
+                    case 1: return row.sample_no;
+                    case 2: return row.source_rep_no;
+                    case 3: return row.mach_name.empty() ? row.mach_code : row.mach_name;
+                    case 4: return row.tester_name;
+                    case 5: return row.item_name;
+                    case 6: return row.level;
+                    case 7: return row.lot_no;
+                    case 8: return row.result_text;
+                    case 9: return row.unit;
+                    case 10: return qcStatusText(row.qc_status);
+                    case 11: return row.qc_rules;
+                    case 12: return row.has_qc_z ? formatNumber(row.qc_z) : "";
+                    case 13: return row.data_source.empty() ? "LIS导入" : row.data_source;
+                    default: return {};
+                }
+            }, error)) {
         MessageBoxW(hwnd, L"导出文件创建失败，请确认目标位置可写。", WINDOW_TITLE, MB_ICONERROR);
         return;
     }
-
-    std::ostringstream csv;
-    csv << "\xEF\xBB\xBF";
-    csv << "时间,样本号,报告号,仪器,检验者,项目,水平,批号,结果,单位,状态,规则,Z值,来源\n";
-    for (const auto* row : rows) {
-        csv << csvEscape(pointDisplayTime(*row)) << ','
-            << csvEscape(row->sample_no) << ','
-            << csvEscape(row->source_rep_no) << ','
-            << csvEscape(row->mach_name.empty() ? row->mach_code : row->mach_name) << ','
-            << csvEscape(row->tester_name) << ','
-            << csvEscape(row->item_name) << ','
-            << csvEscape(row->level) << ','
-            << csvEscape(row->lot_no) << ','
-            << csvEscape(row->result_text) << ','
-            << csvEscape(row->unit) << ','
-            << csvEscape(qcStatusText(row->qc_status)) << ','
-            << csvEscape(row->qc_rules) << ','
-            << csvEscape(row->has_qc_z ? formatNumber(row->qc_z) : "") << ','
-            << csvEscape(row->data_source.empty() ? "LIS导入" : row->data_source) << '\n';
-    }
-    const std::string text = csv.str();
-    fwrite(text.data(), 1, text.size(), file);
-    fclose(file);
     setStatus(st, L"已导出质控明细：" + path);
     MessageBoxW(hwnd, (L"已导出质控明细：\n" + path).c_str(), WINDOW_TITLE, MB_ICONINFORMATION);
 }
@@ -2572,7 +2552,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             st->refreshButton = button(hwnd, IDC_IMPORT_QC, L"导入质控");
             st->chartButton = button(hwnd, IDC_LJ_CHART, L"L-J图");
             EnableWindow(st->chartButton, FALSE);
-            st->exportButton = button(hwnd, IDC_EXPORT_CSV, L"导出CSV");
+            st->exportButton = button(hwnd, IDC_EXPORT_EXCEL, L"导出Excel");
             EnableWindow(st->exportButton, FALSE);
             st->groups = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                                          WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
@@ -2590,7 +2570,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                             0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
             st->sideChartButton = button(hwnd, IDC_LJ_CHART, L"L-J图");
             st->sideDetailsButton = button(hwnd, IDC_SIDE_DETAILS, L"明细");
-            st->sideExportButton = button(hwnd, IDC_EXPORT_CSV, L"导出");
+            st->sideExportButton = button(hwnd, IDC_EXPORT_EXCEL, L"导出");
             EnableWindow(st->sideChartButton, FALSE);
             EnableWindow(st->sideDetailsButton, FALSE);
             EnableWindow(st->sideExportButton, FALSE);
@@ -2639,8 +2619,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 showMachinePicker(hwnd, st);
                 return 0;
             }
-            if (LOWORD(wp) == IDC_EXPORT_CSV) {
-                exportVisibleDetailsCsv(hwnd, st);
+            if (LOWORD(wp) == IDC_EXPORT_EXCEL) {
+                exportVisibleDetailsXlsx(hwnd, st);
                 return 0;
             }
             if (LOWORD(wp) == IDC_LJ_CHART) {

@@ -10,6 +10,7 @@
 #include "search_text.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "xlsx_writer.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -759,34 +760,16 @@ void runQuery(HWND hwnd, State* state) {
     }).detach();
 }
 
-std::string csvEscape(const std::string& text) {
-    const bool quote = text.find_first_of(",\"\r\n") != std::string::npos;
-    std::string out;
-    if (quote) out.push_back('"');
-    for (char ch : text) out += ch == '"' ? "\"\"" : std::string(1, ch);
-    if (quote) out.push_back('"');
-    return out;
-}
-
-bool writeBytes(const std::wstring& path, const std::string& bytes) {
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    DWORD written = 0;
-    const BOOL ok = bytes.empty() || WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
-    CloseHandle(file);
-    return ok && written == bytes.size();
-}
-
-bool chooseCsvPath(HWND hwnd, const std::wstring& defaultName, std::wstring& path) {
+bool chooseXlsxPath(HWND hwnd, const std::wstring& defaultName, std::wstring& path) {
     wchar_t buffer[MAX_PATH]{};
     lstrcpynW(buffer, defaultName.c_str(), MAX_PATH);
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Excel 工作簿 (*.xlsx)\0*.xlsx\0所有文件 (*.*)\0*.*\0";
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"csv";
+    ofn.lpstrDefExt = L"xlsx";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     if (!GetSaveFileNameW(&ofn)) return false;
     path = buffer;
@@ -798,47 +781,53 @@ std::wstring defaultName(State* state, const wchar_t* suffix) {
     std::wstring end = search::utf8_to_wide(state->loadedEnd);
     std::replace(start.begin(), start.end(), L'-', L'.');
     std::replace(end.begin(), end.end(), L'-', L'.');
-    return start + L"-" + end + suffix + L"-" + state->loadedCampus + L".csv";
+    return start + L"-" + end + suffix + L"-" + state->loadedCampus + L".xlsx";
 }
 
-std::string exportMetadata(State* state) {
-    const std::string basis = state->loadedStatisticBasis == "actual" ? "实际输血量" : "申请量对照";
-    const std::string time = state->loadedEventTimeSource == "out" ? "出库时间" :
-        state->loadedEventTimeSource == "apply" ? "申请时间" :
-        state->loadedEventTimeSource == "check" ? "血库审核时间" : "配血时间";
-    return "," + basis + "," + time + "," + thresholdCondition(state->loadedThresholdMl,
-                                     state->loadedThresholdInclusive) + "," +
-           (state->loadedIncludePlateletCryo ? "是," : "否,") + RULE_VERSION + "\n";
+std::string exportMetadataCell(State* state, size_t column) {
+    switch (column) {
+        case 0: return state->loadedStatisticBasis == "actual" ? "实际输血量" : "申请量对照";
+        case 1: return state->loadedEventTimeSource == "out" ? "出库时间" :
+                       state->loadedEventTimeSource == "apply" ? "申请时间" :
+                       state->loadedEventTimeSource == "check" ? "血库审核时间" : "配血时间";
+        case 2: return thresholdCondition(state->loadedThresholdMl, state->loadedThresholdInclusive);
+        case 3: return state->loadedIncludePlateletCryo ? "是" : "否";
+        case 4: return RULE_VERSION;
+        default: return {};
+    }
 }
 
-void exportEventCsv(HWND hwnd, State* state) {
+const std::array<const char*, 5> EXPORT_METADATA_HEADERS = {
+    "统计口径", "事件时间口径", "统计条件", "包括血小板和冷沉淀", "折算规则版本"};
+
+void exportEventXlsx(HWND hwnd, State* state) {
     if (!state || !state->hasResult || state->eventRows.empty()) {
         MessageBoxW(hwnd, L"当前没有可导出的事件明细。", WINDOW_TITLE, MB_ICONINFORMATION);
         return;
     }
     std::wstring path;
-    if (!chooseCsvPath(hwnd, defaultName(state, L"大量输血事件"), path)) return;
-    std::string csv = "\xEF\xBB\xBF";
+    if (!chooseXlsxPath(hwnd, defaultName(state, L"大量输血事件"), path)) return;
+    std::vector<std::string> headers;
     for (int col = 0; col < EVENT_COLUMN_COUNT; ++col) {
-        if (col) csv.push_back(',');
-        csv += csvEscape(search::wide_to_utf8(eventColumnTitle(state, col)));
+        headers.push_back(search::wide_to_utf8(eventColumnTitle(state, col)));
     }
-    csv += ",统计口径,事件时间口径,统计条件,包括血小板和冷沉淀,折算规则版本\n";
-    for (const auto& row : state->eventRows) {
-        for (int col = 0; col < EVENT_COLUMN_COUNT; ++col) {
-            if (col) csv.push_back(',');
-            csv += csvEscape(eventCell(row, col));
-        }
-        csv += exportMetadata(state);
-    }
-    if (!writeBytes(path, csv)) {
+    headers.insert(headers.end(), EXPORT_METADATA_HEADERS.begin(), EXPORT_METADATA_HEADERS.end());
+    std::string error;
+    if (!search::write_xlsx_file(
+            path, "大量输血事件", headers, state->eventRows.size(),
+            [state](size_t row, size_t column) {
+                if (column < EVENT_COLUMN_COUNT) {
+                    return eventCell(state->eventRows[row], static_cast<int>(column));
+                }
+                return exportMetadataCell(state, column - EVENT_COLUMN_COUNT);
+            }, error)) {
         MessageBoxW(hwnd, L"导出失败，请确认目标文件可写。", WINDOW_TITLE, MB_ICONERROR);
         return;
     }
     setStatus(state, L"事件明细已导出：" + path);
 }
 
-void exportComponentCsv(HWND hwnd, State* state) {
+void exportComponentXlsx(HWND hwnd, State* state) {
     if (!state || !state->hasResult) return;
     std::vector<ComponentRow> rows;
     for (const auto& event : state->eventRows) rows.insert(rows.end(), event.components.begin(), event.components.end());
@@ -850,21 +839,21 @@ void exportComponentCsv(HWND hwnd, State* state) {
         return;
     }
     std::wstring path;
-    if (!chooseCsvPath(hwnd, defaultName(state, L"大量输血成分明细"), path)) return;
-    std::string csv = "\xEF\xBB\xBF";
+    if (!chooseXlsxPath(hwnd, defaultName(state, L"大量输血成分明细"), path)) return;
+    std::vector<std::string> headers;
     for (int col = 0; col < COMPONENT_COLUMN_COUNT; ++col) {
-        if (col) csv.push_back(',');
-        csv += csvEscape(search::wide_to_utf8(COMPONENT_COLUMNS[col].title));
+        headers.push_back(search::wide_to_utf8(COMPONENT_COLUMNS[col].title));
     }
-    csv += ",统计口径,事件时间口径,统计条件,包括血小板和冷沉淀,折算规则版本\n";
-    for (const auto& row : rows) {
-        for (int col = 0; col < COMPONENT_COLUMN_COUNT; ++col) {
-            if (col) csv.push_back(',');
-            csv += csvEscape(componentCell(row, col));
-        }
-        csv += exportMetadata(state);
-    }
-    if (!writeBytes(path, csv)) {
+    headers.insert(headers.end(), EXPORT_METADATA_HEADERS.begin(), EXPORT_METADATA_HEADERS.end());
+    std::string error;
+    if (!search::write_xlsx_file(
+            path, "大量输血成分明细", headers, rows.size(),
+            [state, &rows](size_t row, size_t column) {
+                if (column < COMPONENT_COLUMN_COUNT) {
+                    return componentCell(rows[row], static_cast<int>(column));
+                }
+                return exportMetadataCell(state, column - COMPONENT_COLUMN_COUNT);
+            }, error)) {
         MessageBoxW(hwnd, L"导出失败，请确认目标文件可写。", WINDOW_TITLE, MB_ICONERROR);
         return;
     }
@@ -974,8 +963,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!state) break;
             if (search::handle_page_feedback_command(state->feedback, lp, WINDOW_TITLE)) return 0;
             if (LOWORD(wp) == IDC_QUERY) { runQuery(hwnd, state); return 0; }
-            if (LOWORD(wp) == IDC_EXPORT_EVENTS) { exportEventCsv(hwnd, state); return 0; }
-            if (LOWORD(wp) == IDC_EXPORT_COMPONENTS) { exportComponentCsv(hwnd, state); return 0; }
+            if (LOWORD(wp) == IDC_EXPORT_EVENTS) { exportEventXlsx(hwnd, state); return 0; }
+            if (LOWORD(wp) == IDC_EXPORT_COMPONENTS) { exportComponentXlsx(hwnd, state); return 0; }
             if (LOWORD(wp) == IDC_STATISTIC_BASIS && HIWORD(wp) == CBN_SELCHANGE) {
                 const bool actual = SendMessageW(state->statisticBasis, CB_GETCURSEL, 0, 0) == 0;
                 EnableWindow(state->eventTimeSource, actual);

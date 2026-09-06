@@ -94,6 +94,7 @@ add_library(search_ui_core STATIC
     src/trend_window.cpp
     src/trend_chart_renderer.cpp
     src/quality_control_chart_renderer.cpp
+    src/xlsx_writer.cpp
 )
 target_include_directories(search_ui_core PUBLIC src resource)
 target_compile_definitions(search_ui_core PUBLIC UNICODE _UNICODE NOMINMAX ${LIS_WIN7_COMPAT_DEFINITIONS})
@@ -252,6 +253,13 @@ if(BUILD_TESTING)
     target_include_directories(massive_transfusion_core_tests PRIVATE src)
     target_link_libraries(massive_transfusion_core_tests PRIVATE search_core)
     add_test(NAME massive_transfusion_core_tests COMMAND massive_transfusion_core_tests)
+
+    add_executable(xlsx_writer_tests
+        tests/xlsx_writer_test.cpp
+        src/xlsx_writer.cpp
+    )
+    target_include_directories(xlsx_writer_tests PRIVATE src)
+    add_test(NAME xlsx_writer_tests COMMAND xlsx_writer_tests)
 endif()
 
 # ── Qt 5.15 frontend (opt-in) ─────────────────────────────────

@@ -8,6 +8,7 @@
 #include "trend_chart_renderer.h"
 #include "trend_core.h"
 #include "win32_control_id.h"
+#include "xlsx_writer.h"
 
 #include <commdlg.h>
 #include <commctrl.h>
@@ -250,26 +251,6 @@ std::set<std::string> checked_item_codes(const TrendWindowContext& ctx) {
     return codes;
 }
 
-std::string csv_escape(const std::string& text) {
-    bool quote = text.find_first_of(",\"\r\n") != std::string::npos;
-    std::string out;
-    out.reserve(text.size() + 2);
-    if (quote) {
-        out.push_back('"');
-    }
-    for (const char ch : text) {
-        if (ch == '"') {
-            out += "\"\"";
-        } else {
-            out.push_back(ch);
-        }
-    }
-    if (quote) {
-        out.push_back('"');
-    }
-    return out;
-}
-
 std::string sanitize_filename_part(std::string text) {
     text = trim(text);
     for (char& ch : text) {
@@ -329,14 +310,14 @@ std::wstring default_export_filename(const QueryInput& input) {
         }
         filename += parts[i];
     }
-    filename += ".csv";
+    filename += ".xlsx";
     return utf8_to_wide(filename);
 }
 
 std::wstring default_chart_filename(const QueryInput& input, const TrendItemOption* item) {
     auto filename = default_export_filename(input);
-    if (filename.size() >= 4 && filename.substr(filename.size() - 4) == L".csv") {
-        filename.resize(filename.size() - 4);
+    if (filename.size() >= 5 && filename.substr(filename.size() - 5) == L".xlsx") {
+        filename.resize(filename.size() - 5);
     }
     if (item) {
         filename += L"-";
@@ -371,8 +352,8 @@ bool choose_save_path(HWND owner, const std::wstring& default_name, const wchar_
 bool choose_export_path(HWND owner, const QueryInput& input, std::wstring& path) {
     return choose_save_path(owner,
                             default_export_filename(input),
-                            L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0",
-                            L"csv",
+                            L"Excel 工作簿 (*.xlsx)\0*.xlsx\0所有文件 (*.*)\0*.*\0",
+                            L"xlsx",
                             path);
 }
 
@@ -412,41 +393,38 @@ void export_checked_items(TrendWindowContext& ctx) {
         return;
     }
 
-    FILE* file = nullptr;
-#ifdef _MSC_VER
-    _wfopen_s(&file, path.c_str(), L"wb");
-#else
-    file = _wfopen(path.c_str(), L"wb");
-#endif
-    if (!file) {
+    std::vector<const TrendPoint*> rows;
+    for (const auto& point : ctx.points) {
+        if (codes.find(point.item_code) != codes.end()) rows.push_back(&point);
+    }
+    const std::vector<std::string> headers = {
+        "报告时间", "项目代码", "项目名称", "英文名", "结果", "单位", "下限",
+        "上限", "NORMAL", "报告号", "条码号", "样本号", "患者姓名"};
+    std::string error;
+    if (!write_xlsx_file(
+            path, "趋势明细", headers, rows.size(),
+            [&rows](size_t row_index, size_t column) -> std::string {
+                const auto& point = *rows[row_index];
+                switch (column) {
+                    case 0: return point.report_time;
+                    case 1: return point.item_code;
+                    case 2: return point.item_name;
+                    case 3: return point.item_eng;
+                    case 4: return point.result_text;
+                    case 5: return point.unit;
+                    case 6: return point.lower_bound;
+                    case 7: return point.upper_bound;
+                    case 8: return point.normal;
+                    case 9: return point.rep_no;
+                    case 10: return point.txm_no;
+                    case 11: return point.oper_no;
+                    case 12: return point.patient_name;
+                    default: return {};
+                }
+            }, error)) {
         MessageBoxW(ctx.hwnd, L"导出文件创建失败。", L"趋势图", MB_ICONERROR);
         return;
     }
-
-    std::ostringstream csv;
-    csv << "\xEF\xBB\xBF";
-    csv << "报告时间,项目代码,项目名称,英文名,结果,单位,下限,上限,NORMAL,报告号,条码号,样本号,患者姓名\n";
-    for (const auto& point : ctx.points) {
-        if (codes.find(point.item_code) == codes.end()) {
-            continue;
-        }
-        csv << csv_escape(point.report_time) << ','
-            << csv_escape(point.item_code) << ','
-            << csv_escape(point.item_name) << ','
-            << csv_escape(point.item_eng) << ','
-            << csv_escape(point.result_text) << ','
-            << csv_escape(point.unit) << ','
-            << csv_escape(point.lower_bound) << ','
-            << csv_escape(point.upper_bound) << ','
-            << csv_escape(point.normal) << ','
-            << csv_escape(point.rep_no) << ','
-            << csv_escape(point.txm_no) << ','
-            << csv_escape(point.oper_no) << ','
-            << csv_escape(point.patient_name) << '\n';
-    }
-    const auto text = csv.str();
-    fwrite(text.data(), 1, text.size(), file);
-    fclose(file);
     MessageBoxW(ctx.hwnd, L"导出完成。", L"趋势图", MB_ICONINFORMATION);
 }
 

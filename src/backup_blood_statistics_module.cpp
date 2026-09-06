@@ -10,6 +10,7 @@
 #include "search_text.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "xlsx_writer.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -128,7 +129,7 @@ struct BackupBloodState {
     HWND backupType = nullptr;
     HWND includeDeleted = nullptr;
     HWND query = nullptr;
-    HWND exportCsv = nullptr;
+    HWND exportExcel = nullptr;
     HWND legend = nullptr;
     HWND summaryList = nullptr;
     HWND statusSummaryList = nullptr;
@@ -454,7 +455,7 @@ void applyBackupTypeFilter(BackupBloodState* st) {
     }
     sortRows(st, st->sortColumn, false);
     populateDetails(st);
-    EnableWindow(st->exportCsv, st->hasLoadedResult && !st->rows.empty());
+    EnableWindow(st->exportExcel, st->hasLoadedResult && !st->rows.empty());
     if (st->hasLoadedResult) {
         setStatus(st, L"查询结果共 " + std::to_wstring(st->summary.total_count) +
                       L" 个备血申请单，当前显示 " + std::to_wstring(st->rows.size()) + L" 个。" +
@@ -538,7 +539,7 @@ void resizeLayout(HWND hwnd, BackupBloodState* st) {
     x += S(hwnd, 126) + groupGap;
     MoveWindow(st->query, x, secondRow - S(hwnd, 1), S(hwnd, 64), S(hwnd, 27), TRUE);
     x += S(hwnd, 64) + controlGap;
-    MoveWindow(st->exportCsv, x, secondRow - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE);
+    MoveWindow(st->exportExcel, x, secondRow - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE);
     x += S(hwnd, 88) + groupGap;
     const int legendWidth = width - x - pad;
     ShowWindow(st->legend, legendWidth >= S(hwnd, 460) ? SW_SHOW : SW_HIDE);
@@ -578,7 +579,7 @@ void runQuery(HWND hwnd, BackupBloodState* st) {
 
     st->querying = true;
     setQueryControlsEnabled(st, false);
-    EnableWindow(st->exportCsv, FALSE);
+    EnableWindow(st->exportExcel, FALSE);
     setStatus(st, L"正在查询备血申请单...");
     search::show_page_activity(st->feedback, L"正在查询备血申请单，请稍候…");
 
@@ -596,70 +597,43 @@ void runQuery(HWND hwnd, BackupBloodState* st) {
     }).detach();
 }
 
-std::string csvEscape(const std::string& text) {
-    const bool quoted = text.find_first_of(",\"\r\n") != std::string::npos;
-    std::string result;
-    if (quoted) result.push_back('"');
-    for (const char ch : text) {
-        if (ch == '"') result += "\"\"";
-        else result.push_back(ch);
-    }
-    if (quoted) result.push_back('"');
-    return result;
-}
-
-bool writeBytes(const std::wstring& path, const std::string& bytes) {
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    DWORD written = 0;
-    const BOOL ok = bytes.empty() || WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
-    CloseHandle(file);
-    return ok && written == bytes.size();
-}
-
-std::wstring defaultCsvName(BackupBloodState* st) {
+std::wstring defaultXlsxName(BackupBloodState* st) {
     std::wstring start = search::utf8_to_wide(st->loadedStartDate);
     std::wstring end = search::utf8_to_wide(st->loadedEndDate);
     std::replace(start.begin(), start.end(), L'-', L'.');
     std::replace(end.begin(), end.end(), L'-', L'.');
-    return start + L"-" + end + L"备血统计明细-" + st->loadedCampus + L".csv";
+    return start + L"-" + end + L"备血统计明细-" + st->loadedCampus + L".xlsx";
 }
 
-void exportCsv(HWND hwnd, BackupBloodState* st) {
+void exportXlsx(HWND hwnd, BackupBloodState* st) {
     if (!st || !st->hasLoadedResult || st->rows.empty()) {
         MessageBoxW(hwnd, L"当前没有可导出的备血明细。", WINDOW_TITLE, MB_ICONINFORMATION);
         return;
     }
 
     wchar_t path[MAX_PATH]{};
-    const auto defaultName = defaultCsvName(st);
+    const auto defaultName = defaultXlsxName(st);
     lstrcpynW(path, defaultName.c_str(), MAX_PATH);
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Excel 工作簿 (*.xlsx)\0*.xlsx\0所有文件 (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"csv";
+    ofn.lpstrDefExt = L"xlsx";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     if (!GetSaveFileNameW(&ofn)) return;
 
-    std::string csv = "\xEF\xBB\xBF";
+    std::vector<std::string> headers;
     for (int col = 0; col < static_cast<int>(std::size(DETAIL_COLUMNS)); ++col) {
-        if (col > 0) csv.push_back(',');
-        csv += csvEscape(search::wide_to_utf8(DETAIL_COLUMNS[col].title));
+        headers.push_back(search::wide_to_utf8(DETAIL_COLUMNS[col].title));
     }
-    csv.push_back('\n');
-    for (const auto& row : st->rows) {
-        for (int col = 0; col < static_cast<int>(std::size(DETAIL_COLUMNS)); ++col) {
-            if (col > 0) csv.push_back(',');
-            csv += csvEscape(cellValue(row, col));
-        }
-        csv.push_back('\n');
-    }
-
-    if (!writeBytes(path, csv)) {
+    std::string error;
+    if (!search::write_xlsx_file(
+            path, "备血统计明细", headers, st->rows.size(),
+            [st](size_t row, size_t column) {
+                return cellValue(st->rows[row], static_cast<int>(column));
+            }, error)) {
         MessageBoxW(hwnd, L"导出失败，请确认目标文件可写。", WINDOW_TITLE, MB_ICONERROR);
         return;
     }
@@ -707,8 +681,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             addComboItems(st->backupType, backupTypes, static_cast<int>(std::size(backupTypes)));
 
             st->query = search::create_button(hwnd, IDC_QUERY, L"查询", S(hwnd, 468), S(hwnd, 41), S(hwnd, 58), S(hwnd, 27));
-            st->exportCsv = search::create_button(hwnd, IDC_EXPORT, L"导出明细", S(hwnd, 534), S(hwnd, 41), S(hwnd, 82), S(hwnd, 27));
-            EnableWindow(st->exportCsv, FALSE);
+            st->exportExcel = search::create_button(hwnd, IDC_EXPORT, L"导出明细", S(hwnd, 534), S(hwnd, 41), S(hwnd, 82), S(hwnd, 27));
+            EnableWindow(st->exportExcel, FALSE);
             st->legend = CreateWindowExW(0, LEGEND_CLASS, L"", WS_CHILD | WS_VISIBLE,
                 S(hwnd, 650), S(hwnd, 42), S(hwnd, 548), S(hwnd, 25), hwnd, nullptr,
                 GetModuleHandleW(nullptr), nullptr);
@@ -737,7 +711,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                              st->details, st->ctx.uiFont);
             search::add_page_tooltip(st->feedback, st->query,
                                      L"按申请日期、状态、院区和备血类型查询申请单。");
-            search::add_page_tooltip(st->feedback, st->exportCsv,
+            search::add_page_tooltip(st->feedback, st->exportExcel,
                                      L"导出当前筛选后的全部备血统计明细。");
             search::add_page_tooltip(st->feedback, st->details,
                                      L"单击列标题排序；双击记录可跳转输血结果查询。");
@@ -758,7 +732,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (LOWORD(wp) == IDC_EXPORT) {
-                exportCsv(hwnd, st);
+                exportXlsx(hwnd, st);
                 return 0;
             }
             if (LOWORD(wp) == IDC_BACKUP_TYPE && HIWORD(wp) == CBN_SELCHANGE) {
@@ -801,7 +775,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             setQueryControlsEnabled(st, true);
             search::hide_page_activity(st->feedback);
             if (!result->ok) {
-                EnableWindow(st->exportCsv, st->hasLoadedResult && !st->rows.empty());
+                EnableWindow(st->exportExcel, st->hasLoadedResult && !st->rows.empty());
                 search::show_page_alert(st->feedback,
                     L"查询失败：" + search::utf8_to_wide(result->error));
                 return 0;

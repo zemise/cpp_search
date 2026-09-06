@@ -91,7 +91,7 @@ struct ImmuneDuplicateState {
     HWND startDate = nullptr;
     HWND endDate = nullptr;
     HWND query = nullptr;
-    HWND exportCsv = nullptr;
+    HWND exportExcel = nullptr;
     HWND summaryList = nullptr;
     HWND details = nullptr;
     HWND status = nullptr;
@@ -358,7 +358,7 @@ void resizeLayout(HWND hwnd, ImmuneDuplicateState* st) {
     x = pad;
     MoveWindow(st->query, x, secondRow - S(hwnd, 1), S(hwnd, 64), S(hwnd, 27), TRUE);
     x += S(hwnd, 64) + controlGap;
-    MoveWindow(st->exportCsv, x, secondRow - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE);
+    MoveWindow(st->exportExcel, x, secondRow - S(hwnd, 1), S(hwnd, 88), S(hwnd, 27), TRUE);
     x += S(hwnd, 88) + groupGap;
     MoveWindow(st->status, x, secondRow + labelYOffset,
                (std::max)(0, w - x - pad), controlH, TRUE);
@@ -389,7 +389,7 @@ void runQuery(HWND hwnd, ImmuneDuplicateState* st) {
 
     st->querying = true;
     EnableWindow(st->query, FALSE);
-    EnableWindow(st->exportCsv, FALSE);
+    EnableWindow(st->exportExcel, FALSE);
     setStatus(st, L"正在查询免疫重复项目...");
     search::show_page_activity(st->feedback, L"正在查询免疫重复项目，请稍候…");
 
@@ -403,7 +403,7 @@ void runQuery(HWND hwnd, ImmuneDuplicateState* st) {
     }).detach();
 }
 
-void exportCsv(HWND hwnd, ImmuneDuplicateState* st) {
+void showExportUnavailable(HWND hwnd, ImmuneDuplicateState* st) {
     if (!st || st->rows.empty()) {
         setStatus(st, L"当前没有可导出的明细。");
         return;
@@ -452,8 +452,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             setToday(st->startDate, false);
             setToday(st->endDate, true);
             st->query = search::create_button(hwnd, IDC_QUERY, L"查询", S(hwnd, 486), S(hwnd, 9), S(hwnd, 56), S(hwnd, 26));
-            st->exportCsv = search::create_button(hwnd, IDC_EXPORT, L"导出CSV", S(hwnd, 550), S(hwnd, 9), S(hwnd, 82), S(hwnd, 26));
-            EnableWindow(st->exportCsv, FALSE);
+            st->exportExcel = search::create_button(hwnd, IDC_EXPORT, L"导出Excel", S(hwnd, 550), S(hwnd, 9), S(hwnd, 82), S(hwnd, 26));
+            EnableWindow(st->exportExcel, FALSE);
             st->status = label(hwnd, L"请选择签收时间后查询。", S(hwnd, 646), S(hwnd, 12), S(hwnd, 520), S(hwnd, 24), SS_LEFT);
 
             st->summaryList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -472,7 +472,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                              st->details, st->ctx.uiFont);
             search::add_page_tooltip(st->feedback, st->query,
                                      L"按当前签收时间查询免疫项目的疑似重复记录。");
-            search::add_page_tooltip(st->feedback, st->exportCsv,
+            search::add_page_tooltip(st->feedback, st->exportExcel,
                                      L"明细导出功能尚未开放。");
             search::add_page_tooltip(st->feedback, st->details,
                                      L"单击列标题排序；右键复制单元格；双击可跳转常规报告。");
@@ -492,7 +492,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (LOWORD(wp) == IDC_EXPORT) {
-                exportCsv(hwnd, st);
+                showExportUnavailable(hwnd, st);
                 return 0;
             }
             break;
@@ -521,7 +521,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!st) return 0;
             st->querying = false;
             EnableWindow(st->query, TRUE);
-            EnableWindow(st->exportCsv, FALSE);
+            EnableWindow(st->exportExcel, FALSE);
             search::hide_page_activity(st->feedback);
             if (!result->ok) {
                 search::show_page_alert(st->feedback,
