@@ -4,6 +4,7 @@
 
 #include "blood_module.h"
 #include "main_app.h"
+#include "page_feedback.h"
 #include "resource.h"
 #include "search_core.h"
 #include "search_text.h"
@@ -166,6 +167,7 @@ struct State {
     HWND events = nullptr;
     HWND components = nullptr;
     HWND status = nullptr;
+    search::PageFeedback feedback;
     HBRUSH bgBrush = nullptr;
     bool querying = false;
     bool hasResult = false;
@@ -506,7 +508,7 @@ std::string componentCell(const ComponentRow& row, int column) {
 }
 
 void setStatus(State* state, const std::wstring& text) {
-    if (state && state->status) SetWindowTextW(state->status, text.c_str());
+    if (state) search::set_page_status(state->feedback, text);
 }
 
 void populateSummary(State* state) {
@@ -698,6 +700,7 @@ void resizeLayout(HWND hwnd, State* state) {
                (std::max)(S(hwnd, 200), width - pad * 2 - S(hwnd, 382)), h, TRUE);
     MoveWindow(state->components, pad, detailControlsTop + S(hwnd, 29), width - pad * 2,
                (std::max)(S(hwnd, 90), height - detailControlsTop - S(hwnd, 39)), TRUE);
+    search::layout_page_feedback(state->feedback);
 }
 
 void runQuery(HWND hwnd, State* state) {
@@ -736,6 +739,7 @@ void runQuery(HWND hwnd, State* state) {
     EnableWindow(state->exportEvents, FALSE);
     EnableWindow(state->exportComponents, FALSE);
     setStatus(state, L"正在查询并计算24小时事件...");
+    search::show_page_activity(state->feedback, L"正在查询并计算 24 小时事件，请稍候…");
     std::thread([hwnd, query]() {
         auto* result = new QueryResult();
         const auto started = std::chrono::steady_clock::now();
@@ -948,6 +952,16 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             state->components = makeList(hwnd, IDC_COMPONENTS);
             initList(state->components, COMPONENT_COLUMNS, COMPONENT_COLUMN_COUNT);
             applyDefaultColumnLayout(state, true);
+            search::initialize_page_feedback(state->feedback, hwnd, state->status,
+                                             state->events, state->ctx.uiFont);
+            search::add_page_tooltip(state->feedback, state->query,
+                                     L"按当前日期、院区、统计口径和阈值计算大量输血事件。");
+            search::add_page_tooltip(state->feedback, state->exportEvents,
+                                     L"导出当前查询得到的全部事件记录。");
+            search::add_page_tooltip(state->feedback, state->exportComponents,
+                                     L"导出当前查询得到的全部申请成分明细。");
+            search::add_page_tooltip(state->feedback, state->events,
+                                     L"单击列标题排序；双击事件可跳转输血结果查询。");
             search::apply_font_to_children(hwnd, state->ctx.uiFont);
             populateSummary(state);
             resizeLayout(hwnd, state);
@@ -958,6 +972,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_COMMAND:
             if (!state) break;
+            if (search::handle_page_feedback_command(state->feedback, lp, WINDOW_TITLE)) return 0;
             if (LOWORD(wp) == IDC_QUERY) { runQuery(hwnd, state); return 0; }
             if (LOWORD(wp) == IDC_EXPORT_EVENTS) { exportEventCsv(hwnd, state); return 0; }
             if (LOWORD(wp) == IDC_EXPORT_COMPONENTS) { exportComponentCsv(hwnd, state); return 0; }
@@ -1041,12 +1056,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!state) return 0;
             state->querying = false;
             setQueryEnabled(state, true);
+            search::hide_page_activity(state->feedback);
             if (!result->ok) {
                 EnableWindow(state->exportEvents, state->hasResult && !state->eventRows.empty());
                 EnableWindow(state->exportComponents, state->hasResult);
-                setStatus(state, L"查询失败（耗时 " + std::to_wstring(result->elapsedMs) +
-                                 L" ms）：" + search::utf8_to_wide(result->error));
-                MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
+                search::show_page_alert(state->feedback,
+                    L"查询失败（耗时 " + std::to_wstring(result->elapsedMs) +
+                    L" ms）：" + search::utf8_to_wide(result->error));
                 return 0;
             }
             state->totals = result->summary;
@@ -1101,6 +1117,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_CTLCOLORSTATIC:
+            if (state) {
+                LRESULT result = 0;
+                if (search::page_feedback_static_color(
+                        state->feedback, reinterpret_cast<HDC>(wp),
+                        reinterpret_cast<HWND>(lp), result)) return result;
+            }
             SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
             return reinterpret_cast<LRESULT>(state ? state->bgBrush : nullptr);
         case WM_ERASEBKGND: {
@@ -1112,6 +1134,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DESTROY:
             if (state) {
+                search::destroy_page_feedback(state->feedback);
                 if (state->bgBrush) DeleteObject(state->bgBrush);
                 RemovePropW(hwnd, PROP_STATE);
                 delete state;

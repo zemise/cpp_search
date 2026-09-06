@@ -3,6 +3,7 @@
 #ifdef _WIN32
 
 #include "main_app.h"
+#include "page_feedback.h"
 #include "regular_report_module.h"
 #include "resource.h"
 #include "search_core.h"
@@ -94,6 +95,7 @@ struct ImmuneDuplicateState {
     HWND summaryList = nullptr;
     HWND details = nullptr;
     HWND status = nullptr;
+    search::PageFeedback feedback;
     HBRUSH bgBrush = nullptr;
     bool querying = false;
     int sortColumn = -1;
@@ -146,7 +148,7 @@ std::string dateTimeText(HWND hwnd) {
 }
 
 void setStatus(ImmuneDuplicateState* st, const std::wstring& text) {
-    if (st && st->status) SetWindowTextW(st->status, text.c_str());
+    if (st) search::set_page_status(st->feedback, text);
 }
 
 void setCellUtf8(HWND list, int row, int col, const std::string& text) {
@@ -365,6 +367,7 @@ void resizeLayout(HWND hwnd, ImmuneDuplicateState* st) {
     MoveWindow(st->details, pad, topH + summaryH + pad,
                (std::max)(0, w - pad * 2),
                (std::max)(S(hwnd, 100), h - topH - summaryH - pad * 2), TRUE);
+    search::layout_page_feedback(st->feedback);
 }
 
 void runQuery(HWND hwnd, ImmuneDuplicateState* st) {
@@ -388,6 +391,7 @@ void runQuery(HWND hwnd, ImmuneDuplicateState* st) {
     EnableWindow(st->query, FALSE);
     EnableWindow(st->exportCsv, FALSE);
     setStatus(st, L"正在查询免疫重复项目...");
+    search::show_page_activity(st->feedback, L"正在查询免疫重复项目，请稍候…");
 
     std::thread([hwnd, query]() {
         auto* result = new ImmuneDuplicateQueryResult();
@@ -464,6 +468,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ListView_SetExtendedListViewStyle(st->details, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
             initList(st->details, DETAIL_COLUMNS, static_cast<int>(std::size(DETAIL_COLUMNS)));
 
+            search::initialize_page_feedback(st->feedback, hwnd, st->status,
+                                             st->details, st->ctx.uiFont);
+            search::add_page_tooltip(st->feedback, st->query,
+                                     L"按当前签收时间查询免疫项目的疑似重复记录。");
+            search::add_page_tooltip(st->feedback, st->exportCsv,
+                                     L"明细导出功能尚未开放。");
+            search::add_page_tooltip(st->feedback, st->details,
+                                     L"单击列标题排序；右键复制单元格；双击可跳转常规报告。");
+
             search::apply_font_to_children(hwnd, st->ctx.uiFont);
             populateSummary(st);
             resizeLayout(hwnd, st);
@@ -473,6 +486,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             resizeLayout(hwnd, st);
             return 0;
         case WM_COMMAND:
+            if (st && search::handle_page_feedback_command(st->feedback, lp, WINDOW_TITLE)) return 0;
             if (LOWORD(wp) == IDC_QUERY) {
                 runQuery(hwnd, st);
                 return 0;
@@ -508,9 +522,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             st->querying = false;
             EnableWindow(st->query, TRUE);
             EnableWindow(st->exportCsv, FALSE);
+            search::hide_page_activity(st->feedback);
             if (!result->ok) {
-                setStatus(st, L"查询失败：" + search::utf8_to_wide(result->error));
-                MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
+                search::show_page_alert(st->feedback,
+                    L"查询失败：" + search::utf8_to_wide(result->error));
                 return 0;
             }
 
@@ -557,6 +572,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_CTLCOLORSTATIC:
+            if (st) {
+                LRESULT result = 0;
+                if (search::page_feedback_static_color(
+                        st->feedback, reinterpret_cast<HDC>(wp),
+                        reinterpret_cast<HWND>(lp), result)) return result;
+            }
             SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
             return reinterpret_cast<LRESULT>(st ? st->bgBrush : nullptr);
         case WM_ERASEBKGND: {
@@ -567,6 +588,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DESTROY:
             if (st) {
+                search::destroy_page_feedback(st->feedback);
                 if (st->bgBrush) DeleteObject(st->bgBrush);
                 RemovePropW(hwnd, PROP_STATE);
                 delete st;

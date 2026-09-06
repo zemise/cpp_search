@@ -90,6 +90,7 @@ add_library(search_ui_core STATIC
     src/search_ui_presenter.cpp
     src/search_settings_dialog.cpp
     src/search_ui_layout.cpp
+    src/page_feedback.cpp
     src/trend_window.cpp
     src/trend_chart_renderer.cpp
     src/quality_control_chart_renderer.cpp

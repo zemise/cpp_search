@@ -3,6 +3,7 @@
 #ifdef _WIN32
 
 #include "main_app.h"
+#include "page_feedback.h"
 #include "regular_report_module.h"
 #include "resource.h"
 #include "search_core.h"
@@ -184,6 +185,7 @@ struct HivStatisticsState {
     HWND methodologySummary = nullptr;
     HWND details = nullptr;
     HWND status = nullptr;
+    search::PageFeedback feedback;
     HBRUSH bgBrush = nullptr;
     bool querying = false;
     bool hasLoadedResult = false;
@@ -263,7 +265,7 @@ std::wstring selectedComboText(HWND combo) {
 }
 
 void setStatus(HivStatisticsState* st, const std::wstring& text) {
-    if (st && st->status) SetWindowTextW(st->status, text.c_str());
+    if (st) search::set_page_status(st->feedback, text);
 }
 
 int summaryScreeningCount(const search::HivStatSummary& summary, int row) {
@@ -1186,6 +1188,7 @@ void resizeLayout(HWND hwnd, HivStatisticsState* st) {
     MoveWindow(st->details, pad, topH + summaryH + methodologyH + pad * 3, w - pad * 2,
                (std::max)(S(hwnd, 80), h - topH - summaryH - methodologyH - pad * 4 - statusH), TRUE);
     MoveWindow(st->status, pad, h - statusH - S(hwnd, 4), w - pad * 2, statusH, TRUE);
+    search::layout_page_feedback(st->feedback);
 }
 
 void runQuery(HWND hwnd, HivStatisticsState* st) {
@@ -1209,6 +1212,7 @@ void runQuery(HWND hwnd, HivStatisticsState* st) {
     EnableWindow(st->exportButton, FALSE);
     EnableWindow(st->exportDetailsButton, FALSE);
     setStatus(st, L"正在查询 HIV 抗体检测统计...");
+    search::show_page_activity(st->feedback, L"正在查询 HIV 抗体检测统计，请稍候…");
 
     search::HivStatQuery query;
     query.connection_string = search::wide_to_utf8(connection);
@@ -1288,6 +1292,18 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             initDetailList(st->details);
 
             st->status = label(hwnd, L"请选择年份和月份后查询；未上传匹配模版时统计表导出不可用。", 0, 0, 0, 0, SS_LEFT);
+            search::initialize_page_feedback(st->feedback, hwnd, st->status,
+                                             st->details, st->ctx.uiFont);
+            search::add_page_tooltip(st->feedback, st->query,
+                                     L"按年份、月份和检验科查询 HIV 抗体检测统计。");
+            search::add_page_tooltip(st->feedback, st->exportButton,
+                                     L"使用当前汇总结果生成统计表。");
+            search::add_page_tooltip(st->feedback, st->exportDetailsButton,
+                                     L"导出当前已加载、已排序的全部检测明细。");
+            search::add_page_tooltip(st->feedback, st->uploadTemplateButton,
+                                     L"上传与当前统计表格式匹配的 Word 模版。");
+            search::add_page_tooltip(st->feedback, st->details,
+                                     L"单击列标题排序；双击记录可跳转常规报告。");
             search::apply_font_to_children(hwnd, st->ctx.uiFont);
             populateSummary(st);
             populateMethodologySummary(st);
@@ -1298,6 +1314,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             resizeLayout(hwnd, st);
             return 0;
         case WM_COMMAND:
+            if (st && search::handle_page_feedback_command(st->feedback, lp, WINDOW_TITLE)) return 0;
             if (LOWORD(wp) == IDC_QUERY) {
                 runQuery(hwnd, st);
                 return 0;
@@ -1356,11 +1373,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!st) return 0;
             st->querying = false;
             EnableWindow(st->query, TRUE);
+            search::hide_page_activity(st->feedback);
             st->hasLoadedResult = false;
             updateExportButton(st);
             if (!result->ok) {
-                setStatus(st, L"查询失败：" + search::utf8_to_wide(result->error));
-                MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
+                search::show_page_alert(st->feedback,
+                    L"查询失败：" + search::utf8_to_wide(result->error));
                 return 0;
             }
             st->hasLoadedResult = true;
@@ -1389,6 +1407,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_CTLCOLORSTATIC:
+            if (st) {
+                LRESULT result = 0;
+                if (search::page_feedback_static_color(
+                        st->feedback, reinterpret_cast<HDC>(wp),
+                        reinterpret_cast<HWND>(lp), result)) return result;
+            }
             SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
             return reinterpret_cast<LRESULT>(st ? st->bgBrush : nullptr);
         case WM_ERASEBKGND: {
@@ -1399,6 +1423,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DESTROY:
             if (st) {
+                search::destroy_page_feedback(st->feedback);
                 if (st->bgBrush) DeleteObject(st->bgBrush);
                 RemovePropW(hwnd, PROP_STATE);
                 delete st;

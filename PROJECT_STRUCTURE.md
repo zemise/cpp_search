@@ -64,6 +64,7 @@
 | `search_ui_events.*` | Win32 消息分发 → 回调 | Qt signal/slot |
 | `search_ui_presenter.*` | ListView 列定义与行填充 | QTableView + QStandardItemModel |
 | `search_ui_layout.*` | Win32 布局、splitter、字体/DPI缩放、公共控件文本宽度测量，以及 ListView 单元格复制菜单预览 | QLayout + QSplitter |
+| `page_feedback.*` | 查询型 Win32 页面公共反馈组件；负责以明细控件为锚点布置加载卡片和不确定进度条、批量收起结束状态、状态行可点击 Alert 及主要控件 Tooltip；当前由统计分析管理下六个模块复用 | Qt 状态组件、QProgressBar + QToolTip |
 | `search_splitter.*` | Win32 通用拖条控件，向父窗口发送拖动/释放消息 | QSplitter |
 | `search_settings_dialog.*` | Win32 模式对话框 | QDialog |
 | `trend_window.*` | GDI+ 图表 + ListView | QwtPlot + QTableView |

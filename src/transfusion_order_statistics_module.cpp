@@ -4,6 +4,7 @@
 
 #include "blood_module.h"
 #include "main_app.h"
+#include "page_feedback.h"
 #include "resource.h"
 #include "search_core.h"
 #include "search_text.h"
@@ -126,6 +127,7 @@ struct State {
     HWND extraSummary = nullptr;
     HWND details = nullptr;
     HWND status = nullptr;
+    search::PageFeedback feedback;
     HBRUSH bgBrush = nullptr;
     bool querying = false;
     bool hasLoadedResult = false;
@@ -207,7 +209,7 @@ void setDefaultDates(HWND startDate, HWND endDate) {
 }
 
 void setStatus(State* st, const std::wstring& text) {
-    if (st && st->status) SetWindowTextW(st->status, text.c_str());
+    if (st) search::set_page_status(st->feedback, text);
 }
 
 void setQueryControlsEnabled(State* st, bool enabled) {
@@ -440,6 +442,7 @@ void resizeLayout(HWND hwnd, State* st) {
     const int detailY = topH + summaryH * 2 + pad * 2;
     MoveWindow(st->details, pad, detailY, width - pad * 2,
                (std::max)(S(hwnd, 100), height - detailY - pad), TRUE);
+    search::layout_page_feedback(st->feedback);
 }
 
 void runQuery(HWND hwnd, State* st) {
@@ -464,6 +467,7 @@ void runQuery(HWND hwnd, State* st) {
     setQueryControlsEnabled(st, false);
     EnableWindow(st->exportCsv, FALSE);
     setStatus(st, L"正在查询输血申请单...");
+    search::show_page_activity(st->feedback, L"正在查询输血申请单，请稍候…");
     std::thread([hwnd, query]() {
         auto* result = new QueryResult();
         result->includeRejected = query.include_rejected;
@@ -600,6 +604,19 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ListView_SetExtendedListViewStyle(st->details, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
             initList(st->details, DETAIL_COLUMNS, DETAIL_COLUMN_COUNT);
 
+            search::initialize_page_feedback(st->feedback, hwnd, st->status,
+                                             st->details, st->ctx.uiFont);
+            search::add_page_tooltip(st->feedback, st->query,
+                                     L"按申请日期、院区及当前状态范围查询输血申请单。");
+            search::add_page_tooltip(st->feedback, st->exportCsv,
+                                     L"导出当前已加载、已排序的全部输血单明细。");
+            search::add_page_tooltip(st->feedback, st->includeRejected,
+                                     L"勾选后将已驳回申请单纳入查询结果。");
+            search::add_page_tooltip(st->feedback, st->includeDeleted,
+                                     L"勾选后将已删除申请单纳入查询结果。");
+            search::add_page_tooltip(st->feedback, st->details,
+                                     L"单击列标题排序；双击记录可跳转输血结果查询。");
+
             search::apply_font_to_children(hwnd, st->ctx.uiFont);
             populateSummary(st);
             resizeLayout(hwnd, st);
@@ -609,6 +626,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             resizeLayout(hwnd, st);
             return 0;
         case WM_COMMAND:
+            if (st && search::handle_page_feedback_command(st->feedback, lp, WINDOW_TITLE)) return 0;
             if (LOWORD(wp) == IDC_QUERY) { runQuery(hwnd, st); return 0; }
             if (LOWORD(wp) == IDC_EXPORT) { exportCsv(hwnd, st); return 0; }
             break;
@@ -644,10 +662,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!st) return 0;
             st->querying = false;
             setQueryControlsEnabled(st, true);
+            search::hide_page_activity(st->feedback);
             if (!result->ok) {
                 EnableWindow(st->exportCsv, st->hasLoadedResult && !st->rows.empty());
-                setStatus(st, L"查询失败：" + search::utf8_to_wide(result->error));
-                MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
+                search::show_page_alert(st->feedback,
+                    L"查询失败：" + search::utf8_to_wide(result->error));
                 return 0;
             }
             st->summary = result->summary;
@@ -688,6 +707,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_CTLCOLORSTATIC:
+            if (st) {
+                LRESULT result = 0;
+                if (search::page_feedback_static_color(
+                        st->feedback, reinterpret_cast<HDC>(wp),
+                        reinterpret_cast<HWND>(lp), result)) return result;
+            }
             SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
             return reinterpret_cast<LRESULT>(st ? st->bgBrush : nullptr);
         case WM_ERASEBKGND: {
@@ -699,6 +724,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DESTROY:
             if (st) {
+                search::destroy_page_feedback(st->feedback);
                 if (st->bgBrush) DeleteObject(st->bgBrush);
                 RemovePropW(hwnd, PROP_STATE);
                 delete st;
