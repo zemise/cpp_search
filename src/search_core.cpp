@@ -3,15 +3,18 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -79,6 +82,51 @@ bool valid_date_parts(int year, int month, int day) {
     return day <= max_day;
 }
 
+bool parse_sql_datetime_seconds(const std::string& value, long long& seconds) {
+    const std::string text = trim(value);
+    if (text.size() != 19 || text[4] != '-' || text[7] != '-' || text[10] != ' ' ||
+        text[13] != ':' || text[16] != ':') {
+        return false;
+    }
+    const auto digit = [&text](size_t index) {
+        const unsigned char ch = static_cast<unsigned char>(text[index]);
+        return std::isdigit(ch) ? static_cast<int>(ch - '0') : -1;
+    };
+    const auto two_digits = [&digit](size_t index) {
+        const int high = digit(index);
+        const int low = digit(index + 1);
+        return high < 0 || low < 0 ? -1 : high * 10 + low;
+    };
+
+    const int y0 = digit(0);
+    const int y1 = digit(1);
+    const int y2 = digit(2);
+    const int y3 = digit(3);
+    if (y0 < 0 || y1 < 0 || y2 < 0 || y3 < 0) return false;
+    int year = y0 * 1000 + y1 * 100 + y2 * 10 + y3;
+    const int month = two_digits(5);
+    const int day = two_digits(8);
+    const int hour = two_digits(11);
+    const int minute = two_digits(14);
+    const int second = two_digits(17);
+    if (!valid_date_parts(year, month, day) || hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return false;
+    }
+
+    // Convert a civil date to a day number using Gregorian calendar arithmetic.
+    // The constant epoch is irrelevant for differences, and no timezone lookup is needed.
+    year -= month <= 2;
+    const int era = year / 400;
+    const unsigned year_of_era = static_cast<unsigned>(year - era * 400);
+    const unsigned adjusted_month = static_cast<unsigned>(month + (month > 2 ? -3 : 9));
+    const unsigned day_of_year = (153 * adjusted_month + 2) / 5 + static_cast<unsigned>(day) - 1;
+    const unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    const long long days = static_cast<long long>(era) * 146097 + day_of_era;
+    seconds = days * 86400 + hour * 3600 + minute * 60 + second;
+    return true;
+}
+
 std::string date_from_yyyymmdd_prefix(const std::string& value) {
     const std::string text = trim(value);
     if (text.size() < 8) return "";
@@ -101,20 +149,14 @@ std::string date_from_sql_datetime(const std::string& value) {
     return buffer;
 }
 
-int seconds_between_sql_datetimes(const std::string& start, const std::string& end) {
-    std::tm start_tm{};
-    std::tm end_tm{};
-    if (!parse_sql_datetime(start, start_tm) || !parse_sql_datetime(end, end_tm)) {
+long long seconds_between_sql_datetimes(const std::string& start, const std::string& end) {
+    long long start_seconds = 0;
+    long long end_seconds = 0;
+    if (!parse_sql_datetime_seconds(start, start_seconds) ||
+        !parse_sql_datetime_seconds(end, end_seconds) || end_seconds < start_seconds) {
         return -1;
     }
-    const std::time_t start_time = std::mktime(&start_tm);
-    const std::time_t end_time = std::mktime(&end_tm);
-    if (start_time == static_cast<std::time_t>(-1) || end_time == static_cast<std::time_t>(-1)) {
-        return -1;
-    }
-    const double seconds = std::difftime(end_time, start_time);
-    if (seconds < 0) return -1;
-    return static_cast<int>(seconds);
+    return end_seconds - start_seconds;
 }
 
 std::string age_from_birthdate(const std::string& birthdate) {
@@ -655,6 +697,57 @@ bool exec_query(SQLHDBC dbc, const std::string& sql, SQLHSTMT& stmt, std::string
     return true;
 }
 
+using EmployeeNameMap = std::unordered_map<std::string, std::string>;
+
+struct BarcodeEmployeeCache {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::shared_ptr<const EmployeeNameMap>> by_connection;
+};
+
+BarcodeEmployeeCache& barcode_employee_cache() {
+    static BarcodeEmployeeCache cache;
+    return cache;
+}
+
+bool load_barcode_employee_names(SQLHDBC dbc,
+                                 const std::string& connection_string,
+                                 std::shared_ptr<const EmployeeNameMap>& names,
+                                 bool& cache_hit,
+                                 std::string& error,
+                                 LogFn log) {
+    auto& cache = barcode_employee_cache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    const auto cached = cache.by_connection.find(connection_string);
+    if (cached != cache.by_connection.end()) {
+        names = cached->second;
+        cache_hit = true;
+        return true;
+    }
+
+    cache_hit = false;
+    const std::string sql =
+        "SELECT EMPLOYEE_ID,NAME FROM JC_EMPLOYEE_PROPERTY WITH (NOLOCK)";
+    if (log) log("exec employee dictionary sql: " + sql + "\n");
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!exec_query(dbc, sql, stmt, error)) return false;
+
+    auto loaded = std::make_shared<EmployeeNameMap>();
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        const std::string code = trim(fetch_column(stmt, 1));
+        const std::string name = trim(fetch_column(stmt, 2));
+        if (!code.empty() && !name.empty()) {
+            (*loaded)[code] = name;
+        }
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+
+    names = loaded;
+    cache.by_connection[connection_string] = std::move(loaded);
+    error.clear();
+    return true;
+}
+
 void add_eq(std::ostringstream& sql, const char* col, const std::string& value) {
     if (!trim(value).empty()) {
         sql << " AND " << col << "='" << sql_escape(trim(value)) << "'";
@@ -835,6 +928,12 @@ std::string format_duration_seconds_zh(long long total_seconds) {
         return std::to_string(minutes) + "分钟" + std::to_string(seconds) + "秒";
     }
     return std::to_string(seconds) + "秒";
+}
+
+std::string employee_display_name(const std::string& employee_code,
+                                  const std::string& dictionary_name) {
+    const std::string name = trim(dictionary_name);
+    return name.empty() ? trim(employee_code) : name;
 }
 
 bool query_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log) {
@@ -2129,8 +2228,20 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
     error = "query_barcodes is only available on Windows";
     return false;
 #else
+    const auto query_started = std::chrono::steady_clock::now();
     DbContext db;
     if (!connect(filters.connection_string, db, error, log)) return false;
+
+    std::shared_ptr<const EmployeeNameMap> employee_names;
+    bool employee_cache_hit = false;
+    std::string employee_error;
+    const auto employee_dictionary_started = std::chrono::steady_clock::now();
+    if (!load_barcode_employee_names(db.dbc, filters.connection_string, employee_names,
+                                     employee_cache_hit, employee_error, log)) {
+        if (log) log("barcode employee dictionary unavailable: " + employee_error + "\n");
+        employee_names = std::make_shared<const EmployeeNameMap>();
+    }
+    const auto employee_dictionary_finished = std::chrono::steady_clock::now();
 
     const std::string requested_campus = trim(filters.campus);
     const auto campus_matches = [&requested_campus](const std::string& dept_name) {
@@ -2182,8 +2293,8 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         << "isnull(CONVERT(varchar(19),b.IN_DATE,120),'') AS receive_time,"
         << "isnull(LTRIM(RTRIM(b.ORDER_TEXT)),'') AS order_text,"
         << "isnull(LTRIM(RTRIM(b.SAMP_NAME)),'') AS sample_name,"
-        << "isnull(LTRIM(RTRIM(rd.TESTER_NAME)),'') AS tester_name,"
-        << "isnull(LTRIM(RTRIM(rd.REVIEWER_NAME)),'') AS reviewer_name,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(50),rd.OPER_CODE))),'') AS tester_code,"
+        << "isnull(LTRIM(RTRIM(CONVERT(varchar(50),rd.REP_OPER))),'') AS reviewer_code,"
         << "isnull(CONVERT(varchar(19),rd.REP_TIME,120),'') AS review_time,"
         << "isnull(LTRIM(RTRIM(CONVERT(varchar(32),b.FY))),'') AS fee,"
         << "isnull(LTRIM(RTRIM(b.REQ_DRN)),'') AS request_doctor,"
@@ -2212,16 +2323,10 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         << " AND r.TXM_NO=b.BARCODE) rs"
         << " OUTER APPLY (SELECT TOP 1"
         << " r.REP_NO,r.OPER_NO,r.CHK_DATE,r.REP_TIME,r.MACH_CODE,r.ROOM_CODE,mach.MACH_NAME,"
-        << " r.OPER_CODE,r.REP_OPER,"
-        << " isnull(NULLIF(LTRIM(RTRIM(emp_oper.NAME)),''),LTRIM(RTRIM(CONVERT(varchar(50),r.OPER_CODE)))) AS TESTER_NAME,"
-        << " isnull(NULLIF(LTRIM(RTRIM(emp_rep.NAME)),''),LTRIM(RTRIM(CONVERT(varchar(50),r.REP_OPER)))) AS REVIEWER_NAME"
+        << " r.OPER_CODE,r.REP_OPER"
         << " FROM LS_AS_REPORT r WITH (NOLOCK)"
         << " LEFT JOIN LS_AS_MACHINE mach WITH (NOLOCK)"
         << " ON r.MACH_CODE=mach.MACH_CODE AND r.ROOM_CODE=mach.ROOM_CODE AND mach.DELETE_BIT=0"
-        << " LEFT JOIN JC_EMPLOYEE_PROPERTY emp_oper WITH (NOLOCK)"
-        << " ON LTRIM(RTRIM(CONVERT(varchar(50),r.OPER_CODE)))=LTRIM(RTRIM(CONVERT(varchar(50),emp_oper.EMPLOYEE_ID)))"
-        << " LEFT JOIN JC_EMPLOYEE_PROPERTY emp_rep WITH (NOLOCK)"
-        << " ON LTRIM(RTRIM(CONVERT(varchar(50),r.REP_OPER)))=LTRIM(RTRIM(CONVERT(varchar(50),emp_rep.EMPLOYEE_ID)))"
         << " WHERE isnull(r.DELETE_BIT,0)=0"
         << " AND r.TXM_NO=b.BARCODE"
         << " AND NULLIF(LTRIM(RTRIM(CONVERT(varchar(30),r.REP_NO))),'') IS NOT NULL"
@@ -2249,8 +2354,14 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
         row.receive_time   = fetch_column(stmt, 11);
         row.order_text     = fetch_column(stmt, 12);
         row.sample_name    = fetch_column(stmt, 13);
-        row.tester         = fetch_column(stmt, 14);
-        row.reviewer       = fetch_column(stmt, 15);
+        const std::string tester_code = fetch_column(stmt, 14);
+        const std::string reviewer_code = fetch_column(stmt, 15);
+        const auto tester_name = employee_names->find(tester_code);
+        const auto reviewer_name = employee_names->find(reviewer_code);
+        row.tester         = employee_display_name(
+            tester_code, tester_name != employee_names->end() ? tester_name->second : "");
+        row.reviewer       = employee_display_name(
+            reviewer_code, reviewer_name != employee_names->end() ? reviewer_name->second : "");
         row.review_time    = fetch_column(stmt, 16);
         row.fee            = fetch_column(stmt, 17);
         row.request_doctor = fetch_column(stmt, 18);
@@ -2274,6 +2385,46 @@ bool query_barcodes(const BarcodeQueryFilters& filters, std::vector<BarcodeQuery
     }
 
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    const auto database_finished = std::chrono::steady_clock::now();
+
+    struct CachedReviewElapsed {
+        long long seconds = -1;
+        std::string text;
+    };
+    std::unordered_map<std::string, CachedReviewElapsed> elapsed_cache;
+    elapsed_cache.reserve(rows.size());
+    for (auto& row : rows) {
+        if (row.receive_time.empty() || row.review_time.empty()) continue;
+        const std::string cache_key = row.receive_time + '\x1f' + row.review_time;
+        auto found = elapsed_cache.find(cache_key);
+        if (found == elapsed_cache.end()) {
+            CachedReviewElapsed elapsed;
+            elapsed.seconds = sql_datetime_diff_seconds(row.receive_time, row.review_time);
+            elapsed.text = format_duration_seconds_zh(elapsed.seconds);
+            found = elapsed_cache.emplace(cache_key, std::move(elapsed)).first;
+        }
+        row.review_elapsed_seconds = found->second.seconds;
+        row.review_elapsed = found->second.text;
+    }
+    const auto calculation_finished = std::chrono::steady_clock::now();
+    if (log) {
+        const auto database_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            database_finished - query_started).count();
+        const auto calculation_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            calculation_finished - database_finished).count();
+        const auto employee_dictionary_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            employee_dictionary_finished - employee_dictionary_started).count();
+        const auto main_query_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            database_finished - employee_dictionary_finished).count();
+        log("barcode query timing: database_and_fetch_ms=" + std::to_string(database_ms) +
+            ", main_query_and_fetch_ms=" + std::to_string(main_query_ms) +
+            ", employee_dictionary_ms=" + std::to_string(employee_dictionary_ms) +
+            ", employee_cache_hit=" + std::to_string(employee_cache_hit ? 1 : 0) +
+            ", employee_cache_entries=" + std::to_string(employee_names->size()) +
+            ", duration_ms=" + std::to_string(calculation_ms) +
+            ", rows=" + std::to_string(rows.size()) +
+            ", duration_cache_entries=" + std::to_string(elapsed_cache.size()) + "\n");
+    }
     error.clear();
     return true;
 #endif

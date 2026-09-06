@@ -789,6 +789,8 @@ using LogFn = std::function<void(const std::string&)>;
 
 long long sql_datetime_diff_seconds(const std::string& start, const std::string& end);
 std::string format_duration_seconds_zh(long long total_seconds);
+std::string employee_display_name(const std::string& employee_code,
+                                  const std::string& dictionary_name);
 
 bool query_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log = {});
 bool query_barcode_rooms(const std::string& connection_string, std::vector<RoomOption>& rows, std::string& error, LogFn log = {});

@@ -18,6 +18,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -1077,12 +1078,6 @@ int compareBarcodeSortValue(const search::BarcodeQueryRow& a,
     return 0;
 }
 
-void calculateReviewElapsed(search::BarcodeQueryRow& row) {
-    row.review_elapsed_seconds = search::sql_datetime_diff_seconds(
-        row.receive_time, row.review_time);
-    row.review_elapsed = search::format_duration_seconds_zh(row.review_elapsed_seconds);
-}
-
 std::string barcodeRowKey(const search::BarcodeQueryRow& row) {
     return row.barcode + "|" + row.sample_no + "|" + row.reg_no + "|" + row.order_text;
 }
@@ -1290,7 +1285,15 @@ void runQuery(HWND hwnd, BarcodeState* st) {
     st->bgThread = std::thread([hwnd, filters]() {
         try {
             auto* result = new BarcodeQueryResult;
-            result->ok = search::query_barcodes(filters, result->rows, result->error);
+            result->ok = search::query_barcodes(
+                filters, result->rows, result->error,
+                [](const std::string& message) {
+                    if (message.rfind("barcode query timing:", 0) == 0) {
+                        LOG_DEBUG(message);
+                    } else if (message.rfind("barcode employee dictionary unavailable:", 0) == 0) {
+                        LOG_WARN(message);
+                    }
+                });
             if (!PostMessageW(hwnd, WM_BARCODE_LOADED, 0, reinterpret_cast<LPARAM>(result))) {
                 LOG_WARN("PostMessageW WM_BARCODE_LOADED failed");
                 delete result;
@@ -1309,11 +1312,18 @@ void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult
         return;
     }
     st->rows = std::move(result->rows);
-    for (auto& row : st->rows) {
-        calculateReviewElapsed(row);
-    }
+    const auto sort_started = std::chrono::steady_clock::now();
     sortBarcodeRowsForDisplay(st);
+    const auto list_started = std::chrono::steady_clock::now();
     presentRows(st);
+    const auto list_finished = std::chrono::steady_clock::now();
+    const auto sort_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        list_started - sort_started).count();
+    const auto list_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        list_finished - list_started).count();
+    LOG_DEBUG("barcode UI timing: sort_ms=" + std::to_string(sort_ms) +
+              ", listview_ms=" + std::to_string(list_ms) +
+              ", rows=" + std::to_string(st->rows.size()));
     updateExportButton(st);
     setStatus(st, L"查询完成：院区 " + search::utf8_to_wide(comboText(st->campus)) +
               L"，专业组 " + roomSummary(st) +
