@@ -48,6 +48,21 @@ std::string sql_string_list(const std::vector<std::string>& values) {
     return out.str();
 }
 
+std::string local_datetime_text() {
+    const std::time_t value = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &value);
+#else
+    localtime_r(&value, &local);
+#endif
+    char buffer[32]{};
+    std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
+                  local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+                  local.tm_hour, local.tm_min, local.tm_sec);
+    return buffer;
+}
+
 bool parse_sql_datetime(const std::string& value, std::tm& out) {
     const std::string text = trim(value);
     if (text.size() < 10) return false;
@@ -3560,6 +3575,305 @@ bool query_emergency_statistics(const EmergencyStatQuery& query, EmergencyStatSu
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     error.clear();
     return true;
+#endif
+}
+
+void refresh_tat_statistics(const TatThresholds& thresholds,
+                            const std::string& current_time,
+                            TatStatSummary& summary,
+                            std::vector<TatStatDetailRow>& rows) {
+    summary = TatStatSummary{};
+    const std::string now = trim(current_time).empty() ? local_datetime_text() : trim(current_time);
+    const auto threshold_seconds = [](int minutes) -> long long {
+        return static_cast<long long>((std::max)(1, minutes)) * 60LL;
+    };
+    for (auto& row : rows) {
+        row.machine_waiting = trim(row.machine_time).empty();
+        row.review_waiting = trim(row.review_time).empty();
+        row.time_abnormal = false;
+
+        const auto duration = [&row, &now](const std::string& start,
+                                           const std::string& actual_end,
+                                           bool waiting,
+                                           long long& seconds,
+                                           std::string& text) {
+            seconds = -1;
+            text.clear();
+            if (trim(start).empty()) return;
+            const std::string end = waiting ? now : actual_end;
+            if (trim(end).empty()) return;
+            seconds = sql_datetime_diff_seconds(start, end);
+            if (seconds < 0) {
+                row.time_abnormal = true;
+                text = "时间异常";
+                return;
+            }
+            text = format_duration_seconds_zh(seconds);
+            if (waiting) text += "（等待中）";
+        };
+
+        duration(row.collection_time, row.receive_time, false,
+                 row.collection_to_receive_seconds, row.collection_to_receive);
+        duration(row.receive_time, row.machine_time, row.machine_waiting,
+                 row.receive_to_machine_seconds, row.receive_to_machine);
+        duration(row.receive_time, row.review_time, row.review_waiting,
+                 row.receive_to_review_seconds, row.receive_to_review);
+        duration(row.collection_time, row.review_time, row.review_waiting,
+                 row.collection_to_review_seconds, row.collection_to_review);
+
+        const bool overtime =
+            (row.collection_to_receive_seconds >= 0 &&
+             row.collection_to_receive_seconds > threshold_seconds(thresholds.collection_to_receive_minutes)) ||
+            (row.receive_to_machine_seconds >= 0 &&
+             row.receive_to_machine_seconds > threshold_seconds(thresholds.receive_to_machine_minutes)) ||
+            (row.receive_to_review_seconds >= 0 &&
+             row.receive_to_review_seconds > threshold_seconds(thresholds.receive_to_review_minutes)) ||
+            (row.collection_to_review_seconds >= 0 &&
+             row.collection_to_review_seconds > threshold_seconds(thresholds.collection_to_review_minutes));
+
+        if (row.time_abnormal) {
+            row.tat_status = "时间异常";
+            ++summary.time_abnormal_count;
+        } else if (overtime) {
+            row.tat_status = "超时";
+            ++summary.overtime_count;
+        } else {
+            row.tat_status = "正常";
+            ++summary.normal_count;
+        }
+        if (row.machine_waiting) ++summary.waiting_machine_count;
+        if (row.review_waiting) ++summary.waiting_review_count;
+        ++summary.total_count;
+    }
+}
+
+bool build_tat_statistics(const TatStatQuery& query,
+                          const std::vector<TatStatRawRow>& raw_rows,
+                          TatStatSummary& summary,
+                          std::vector<TatStatDetailRow>& rows,
+                          std::string& error) {
+    summary = TatStatSummary{};
+    rows.clear();
+    std::unordered_map<std::string, size_t> indexes;
+    std::vector<std::set<std::string>> order_sets;
+
+    const auto assign_if_empty = [](std::string& target, const std::string& value) {
+        if (trim(target).empty() && !trim(value).empty()) target = trim(value);
+    };
+    for (const auto& raw : raw_rows) {
+        const std::string barcode = trim(raw.barcode);
+        if (barcode.empty()) continue;
+        auto found = indexes.find(barcode);
+        if (found == indexes.end()) {
+            TatStatDetailRow row;
+            static_cast<TatStatRawRow&>(row) = raw;
+            row.barcode = barcode;
+            row.order_text.clear();
+            rows.push_back(std::move(row));
+            order_sets.emplace_back();
+            const size_t index = rows.size() - 1;
+            indexes[barcode] = index;
+            found = indexes.find(barcode);
+        }
+        const size_t index = found->second;
+        auto& row = rows[index];
+        const std::string order = trim(raw.order_text);
+        if (!order.empty() && order_sets[index].insert(order).second) {
+            if (!row.order_text.empty()) row.order_text += "/";
+            row.order_text += order;
+        }
+        assign_if_empty(row.patient_type, raw.patient_type);
+        assign_if_empty(row.reg_no, raw.reg_no);
+        assign_if_empty(row.name, raw.name);
+        assign_if_empty(row.sex, raw.sex);
+        assign_if_empty(row.diagnosis, raw.diagnosis);
+        assign_if_empty(row.bed_no, raw.bed_no);
+        assign_if_empty(row.age, raw.age);
+        assign_if_empty(row.sample_name, raw.sample_name);
+        assign_if_empty(row.department_name, raw.department_name);
+        assign_if_empty(row.room_code, raw.room_code);
+        assign_if_empty(row.room_name, raw.room_name);
+        assign_if_empty(row.collection_time, raw.collection_time);
+        assign_if_empty(row.receive_time, raw.receive_time);
+        assign_if_empty(row.receiver, raw.receiver);
+        assign_if_empty(row.report_no, raw.report_no);
+        assign_if_empty(row.oper_no, raw.oper_no);
+        assign_if_empty(row.machine_code, raw.machine_code);
+        assign_if_empty(row.machine_name, raw.machine_name);
+        assign_if_empty(row.inspect_date, raw.inspect_date);
+        assign_if_empty(row.machine_time, raw.machine_time);
+        assign_if_empty(row.review_time, raw.review_time);
+        assign_if_empty(row.reviewer, raw.reviewer);
+        assign_if_empty(row.chk_flag, raw.chk_flag);
+        assign_if_empty(row.conf, raw.conf);
+        if (raw.barcode_oper_state >= 0 &&
+            (row.barcode_oper_state < 0 || raw.barcode_oper_state > row.barcode_oper_state)) {
+            row.barcode_oper_state = raw.barcode_oper_state;
+        }
+        row.barcode_emergency = row.barcode_emergency || raw.barcode_emergency;
+        row.report_emergency = row.report_emergency || raw.report_emergency;
+        row.has_report = row.has_report || raw.has_report;
+        row.report_reviewed = row.report_reviewed || raw.report_reviewed;
+        row.report_sent = row.report_sent || raw.report_sent;
+    }
+
+    const std::string patient_type = trim(query.patient_type);
+    rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const TatStatDetailRow& row) {
+        if (query.emergency_only && !row.barcode_emergency && !row.report_emergency) return true;
+        if (patient_type == "住院" && !contains_text(row.patient_type, "住院")) return true;
+        if (patient_type == "门诊" && !contains_text(row.patient_type, "门诊")) return true;
+        return false;
+    }), rows.end());
+
+    for (auto& row : rows) {
+        if (row.report_sent) row.workflow_status = "发送完成";
+        else if (row.report_reviewed) row.workflow_status = "已审核未发送";
+        else if (row.has_report || row.barcode_oper_state >= 1) row.workflow_status = "已上机未审核";
+        else row.workflow_status = "已签收未上机";
+    }
+    refresh_tat_statistics(query.thresholds, query.current_time, summary, rows);
+    error.clear();
+    return true;
+}
+
+bool query_tat_statistics(const TatStatQuery& query, TatStatSummary& summary,
+                          std::vector<TatStatDetailRow>& rows,
+                          std::string& error, LogFn log) {
+    summary = TatStatSummary{};
+    rows.clear();
+#ifndef _WIN32
+    (void)query;
+    (void)log;
+    error = "query_tat_statistics is only available on Windows";
+    return false;
+#else
+    const std::string start_time = trim(query.start_time);
+    const std::string end_time = trim(query.end_time);
+    if (start_time.empty() || end_time.empty() || start_time > end_time) {
+        error = "valid start_time and end_time are required";
+        return false;
+    }
+    DbContext db;
+    if (!connect(query.connection_string, db, error, log)) return false;
+
+    std::shared_ptr<const EmployeeNameMap> employee_names;
+    bool cache_hit = false;
+    std::string employee_error;
+    if (!load_barcode_employee_names(db.dbc, query.connection_string, employee_names,
+                                     cache_hit, employee_error, log)) {
+        if (log) log("tat employee dictionary unavailable: " + employee_error + "\n");
+        employee_names = std::make_shared<const EmployeeNameMap>();
+    }
+
+    std::ostringstream where;
+    where << " WHERE isnull(b.DELETE_BIT,0)=0"
+          << " AND b.CANCEL_DATE IS NULL"
+          << " AND b.IN_DATE>='" << sql_escape(start_time) << "'"
+          << " AND b.IN_DATE<DATEADD(minute,1,'" << sql_escape(end_time) << "')"
+          << " AND NULLIF(LTRIM(RTRIM(b.BARCODE)),'') IS NOT NULL";
+    add_eq(where, "CONVERT(varchar(20),b.ROOM_CODE)", query.room_code);
+    add_like(where, "b.DEPT_NAME", query.department_keyword);
+    add_like(where, "b.ORDER_TEXT", query.order_keyword);
+
+    std::ostringstream sql;
+    sql << "SELECT"
+        << " isnull(LTRIM(RTRIM(b.BARCODE)),''),"
+        << " isnull(LTRIM(RTRIM(b.TYPENAME)),''),"
+        << " isnull(LTRIM(RTRIM(b.REG_NO)),''),"
+        << " isnull(LTRIM(RTRIM(b.NAME)),''),"
+        << " isnull(LTRIM(RTRIM(b.SEX)),''),"
+        << " isnull(LTRIM(RTRIM(rd.DIAG_NAME)),''),"
+        << " isnull(LTRIM(RTRIM(b.BEDNO)),''),"
+        << " isnull(LTRIM(RTRIM(b.AGE)),''),"
+        << " isnull(LTRIM(RTRIM(b.SAMP_NAME)),''),"
+        << " isnull(LTRIM(RTRIM(b.DEPT_NAME)),''),"
+        << " isnull(CONVERT(varchar(20),COALESCE(rd.ROOM_CODE,b.ROOM_CODE)),''),"
+        << " isnull(nullif(LTRIM(RTRIM(room.ROOM_NAME)),''),isnull(CONVERT(varchar(20),COALESCE(rd.ROOM_CODE,b.ROOM_CODE)),'')),"
+        << " isnull(LTRIM(RTRIM(b.ORDER_TEXT)),''),"
+        << " isnull(LTRIM(RTRIM(CONVERT(varchar(32),b.COLLECTION_TIME))),''),"
+        << " isnull(CONVERT(varchar(19),b.IN_DATE,120),''),"
+        << " isnull(LTRIM(RTRIM(CONVERT(varchar(50),b.OPER_CODE))),''),"
+        << " isnull(CONVERT(varchar(30),rd.REP_NO),''),"
+        << " isnull(LTRIM(RTRIM(rd.OPER_NO)),''),"
+        << " isnull(CONVERT(varchar(20),rd.MACH_CODE),''),"
+        << " isnull(nullif(LTRIM(RTRIM(rd.MACH_NAME)),''),isnull(CONVERT(varchar(20),rd.MACH_CODE),'')),"
+        << " isnull(CONVERT(varchar(19),rd.CHK_DATE,120),''),"
+        << " isnull(CONVERT(varchar(19),rd.CREATE_TIME,120),''),"
+        << " isnull(CONVERT(varchar(19),rd.REP_TIME,120),''),"
+        << " isnull(LTRIM(RTRIM(CONVERT(varchar(50),rd.REP_OPER))),''),"
+        << " isnull(rd.CHK_FLAG,''),isnull(rd.CONF,''),"
+        << " isnull(CONVERT(varchar(20),b.OPER_STATE),''),"
+        << " CASE WHEN isnull(b.JZ_FLAG,0)=1 THEN '1' ELSE '0' END,"
+        << " isnull(CONVERT(varchar(10),rs.REPORT_EMERGENCY),'0'),"
+        << " isnull(CONVERT(varchar(10),rs.HAS_REPORT),'0'),"
+        << " isnull(CONVERT(varchar(10),rs.REPORT_REVIEWED),'0'),"
+        << " isnull(CONVERT(varchar(10),rs.REPORT_SENT),'0')"
+        << " FROM LS_AS_BARCODE b WITH (NOLOCK)"
+        << " OUTER APPLY (SELECT"
+        << " MAX(CASE WHEN NULLIF(LTRIM(RTRIM(CONVERT(varchar(30),r.REP_NO))),'') IS NOT NULL THEN 1 ELSE 0 END) HAS_REPORT,"
+        << " MAX(CASE WHEN r.assaypat_type='0' THEN 1 ELSE 0 END) REPORT_EMERGENCY,"
+        << " MAX(CASE WHEN LTRIM(RTRIM(isnull(r.CHK_FLAG,'')))='T' THEN 1 ELSE 0 END) REPORT_REVIEWED,"
+        << " MAX(CASE WHEN LTRIM(RTRIM(isnull(r.CONF,'')))='S' THEN 1 ELSE 0 END) REPORT_SENT"
+        << " FROM LS_AS_REPORT r WITH (NOLOCK)"
+        << " WHERE isnull(r.DELETE_BIT,0)=0 AND r.TXM_NO=b.BARCODE) rs"
+        << " OUTER APPLY (SELECT TOP 1 r.REP_NO,r.OPER_NO,r.MACH_CODE,r.ROOM_CODE,"
+        << " r.CHK_DATE,r.CREATE_TIME,r.REP_TIME,r.REP_OPER,r.CHK_FLAG,r.CONF,r.DIAG_NAME,"
+        << " mach.MACH_NAME"
+        << " FROM LS_AS_REPORT r WITH (NOLOCK)"
+        << " LEFT JOIN LS_AS_MACHINE mach WITH (NOLOCK)"
+        << " ON mach.MACH_CODE=r.MACH_CODE AND mach.ROOM_CODE=r.ROOM_CODE AND isnull(mach.DELETE_BIT,0)=0"
+        << " WHERE isnull(r.DELETE_BIT,0)=0 AND r.TXM_NO=b.BARCODE"
+        << " ORDER BY r.CHK_DATE DESC,r.REP_TIME DESC,r.REP_NO DESC) rd"
+        << " LEFT JOIN LS_AS_ROOM room WITH (NOLOCK)"
+        << " ON room.ROOM_CODE=COALESCE(rd.ROOM_CODE,b.ROOM_CODE) AND isnull(room.DELETE_BIT,0)=0"
+        << where.str()
+        << " ORDER BY b.IN_DATE,b.BARCODE,b.ID";
+    if (log) log("exec sql: " + sql.str() + "\n");
+
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+    if (!exec_query(db.dbc, sql.str(), stmt, error)) return false;
+    std::vector<TatStatRawRow> raw_rows;
+    while (SQLFetch(stmt) == SQL_SUCCESS) {
+        TatStatRawRow row;
+        row.barcode = fetch_column(stmt, 1);
+        row.patient_type = fetch_column(stmt, 2);
+        row.reg_no = fetch_column(stmt, 3);
+        row.name = fetch_column(stmt, 4);
+        row.sex = fetch_column(stmt, 5);
+        row.diagnosis = fetch_column(stmt, 6);
+        row.bed_no = fetch_column(stmt, 7);
+        row.age = fetch_column(stmt, 8);
+        row.sample_name = fetch_column(stmt, 9);
+        row.department_name = fetch_column(stmt, 10);
+        row.room_code = fetch_column(stmt, 11);
+        row.room_name = fetch_column(stmt, 12);
+        row.order_text = fetch_column(stmt, 13);
+        row.collection_time = fetch_column(stmt, 14);
+        row.receive_time = fetch_column(stmt, 15);
+        row.receiver = fetch_column(stmt, 16);
+        row.report_no = fetch_column(stmt, 17);
+        row.oper_no = fetch_column(stmt, 18);
+        row.machine_code = fetch_column(stmt, 19);
+        row.machine_name = fetch_column(stmt, 20);
+        row.inspect_date = fetch_column(stmt, 21);
+        row.machine_time = fetch_column(stmt, 22);
+        row.review_time = fetch_column(stmt, 23);
+        const std::string reviewer_code = fetch_column(stmt, 24);
+        const auto reviewer = employee_names->find(trim(reviewer_code));
+        row.reviewer = employee_display_name(
+            reviewer_code, reviewer != employee_names->end() ? reviewer->second : "");
+        row.chk_flag = fetch_column(stmt, 25);
+        row.conf = fetch_column(stmt, 26);
+        row.barcode_oper_state = std::atoi(fetch_column(stmt, 27).c_str());
+        row.barcode_emergency = fetch_column(stmt, 28) == "1";
+        row.report_emergency = fetch_column(stmt, 29) == "1";
+        row.has_report = fetch_column(stmt, 30) == "1";
+        row.report_reviewed = fetch_column(stmt, 31) == "1";
+        row.report_sent = fetch_column(stmt, 32) == "1";
+        raw_rows.push_back(std::move(row));
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    return build_tat_statistics(query, raw_rows, summary, rows, error);
 #endif
 }
 

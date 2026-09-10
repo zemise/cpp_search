@@ -179,6 +179,7 @@ add_executable(main_app WIN32
     src/regular_report_picture.cpp
     src/specimen_sign_module.cpp
     src/settings_module.cpp
+    src/tat_statistics_module.cpp
     src/transfusion_order_statistics_module.cpp
     src/search_splitter.cpp
     src/tinflate.cpp
@@ -246,6 +247,17 @@ if(BUILD_TESTING)
         target_link_libraries(search_datetime_tests PRIVATE odbc32)
     endif()
     add_test(NAME search_datetime_tests COMMAND search_datetime_tests)
+
+    add_executable(tat_statistics_tests
+        tests/tat_statistics_test.cpp
+        src/search_core.cpp
+        src/search_text.cpp
+    )
+    target_include_directories(tat_statistics_tests PRIVATE src)
+    if(WIN32)
+        target_link_libraries(tat_statistics_tests PRIVATE odbc32)
+    endif()
+    add_test(NAME tat_statistics_tests COMMAND tat_statistics_tests)
 
     add_executable(massive_transfusion_core_tests
         tests/massive_transfusion_statistics_test.cpp

@@ -467,6 +467,86 @@ struct EmergencyStatQuery {
     bool only_unfinished = false;
 };
 
+struct TatThresholds {
+    int collection_to_receive_minutes = 30;
+    int receive_to_machine_minutes = 30;
+    int receive_to_review_minutes = 180;
+    int collection_to_review_minutes = 240;
+};
+
+struct TatStatQuery {
+    std::string connection_string;
+    std::string start_time;
+    std::string end_time;
+    std::string room_code;
+    std::string department_keyword;
+    std::string order_keyword;
+    std::string patient_type;  // 全部/住院/门诊
+    bool emergency_only = false;
+    TatThresholds thresholds;
+    std::string current_time;  // Tests may inject a stable clock; empty uses local current time.
+};
+
+struct TatStatRawRow {
+    std::string barcode;
+    std::string patient_type;
+    std::string reg_no;
+    std::string name;
+    std::string sex;
+    std::string diagnosis;
+    std::string bed_no;
+    std::string age;
+    std::string sample_name;
+    std::string department_name;
+    std::string room_code;
+    std::string room_name;
+    std::string order_text;
+    std::string collection_time;
+    std::string receive_time;
+    std::string receiver;
+    std::string report_no;
+    std::string oper_no;
+    std::string machine_code;
+    std::string machine_name;
+    std::string inspect_date;
+    std::string machine_time;
+    std::string review_time;
+    std::string reviewer;
+    std::string chk_flag;
+    std::string conf;
+    int barcode_oper_state = -1;
+    bool barcode_emergency = false;
+    bool report_emergency = false;
+    bool has_report = false;
+    bool report_reviewed = false;
+    bool report_sent = false;
+};
+
+struct TatStatDetailRow : TatStatRawRow {
+    std::string workflow_status;
+    std::string tat_status;
+    long long collection_to_receive_seconds = -1;
+    long long receive_to_machine_seconds = -1;
+    long long receive_to_review_seconds = -1;
+    long long collection_to_review_seconds = -1;
+    std::string collection_to_receive;
+    std::string receive_to_machine;
+    std::string receive_to_review;
+    std::string collection_to_review;
+    bool machine_waiting = false;
+    bool review_waiting = false;
+    bool time_abnormal = false;
+};
+
+struct TatStatSummary {
+    int total_count = 0;
+    int normal_count = 0;
+    int overtime_count = 0;
+    int time_abnormal_count = 0;
+    int waiting_machine_count = 0;
+    int waiting_review_count = 0;
+};
+
 struct BackupBloodStatQuery {
     std::string connection_string;
     std::string start_date;
@@ -814,6 +894,18 @@ bool query_specimen_barcode(const SpecimenBarcodeQuery& query, SpecimenBarcodeRe
 bool query_specimen_signed_list(const SpecimenSignedListQuery& query, std::vector<SpecimenSignedListRow>& rows, std::string& error, LogFn log = {});
 bool query_hiv_statistics(const HivStatQuery& query, HivStatSummary& summary, std::vector<HivStatDetailRow>& rows, std::string& error, LogFn log = {});
 bool query_emergency_statistics(const EmergencyStatQuery& query, EmergencyStatSummary& summary, std::vector<EmergencyStatDetailRow>& rows, std::string& error, LogFn log = {});
+bool build_tat_statistics(const TatStatQuery& query,
+                          const std::vector<TatStatRawRow>& raw_rows,
+                          TatStatSummary& summary,
+                          std::vector<TatStatDetailRow>& rows,
+                          std::string& error);
+void refresh_tat_statistics(const TatThresholds& thresholds,
+                            const std::string& current_time,
+                            TatStatSummary& summary,
+                            std::vector<TatStatDetailRow>& rows);
+bool query_tat_statistics(const TatStatQuery& query, TatStatSummary& summary,
+                          std::vector<TatStatDetailRow>& rows,
+                          std::string& error, LogFn log = {});
 bool query_backup_blood_statistics(const BackupBloodStatQuery& query, BackupBloodStatSummary& summary, std::vector<BackupBloodStatDetailRow>& rows, std::string& error, LogFn log = {});
 bool build_transfusion_order_statistics(const TransfusionOrderStatQuery& query,
                                         const std::vector<TransfusionOrderStatRawRow>& raw_rows,
