@@ -114,6 +114,32 @@ int main() {
     CHECK(saw_boundary_event);
     CHECK(saw_rejected);
 
+    auto application_name_first = make_row(
+        "7", "N1", "P-NAME", "2026-08-01 08:00:00", "已审核", "71",
+        "红细胞", "4", "U");
+    application_name_first.patient_name = "无名氏";
+    auto application_name_later = make_row(
+        "8", "N2", "P-NAME", "2026-08-01 12:00:00", "已审核", "81",
+        "血浆", "800", "ML", "2");
+    application_name_later.patient_name = "示例姓名";
+    summary = {};
+    events.clear();
+    rejected.clear();
+    CHECK(search::build_massive_transfusion_statistics(
+        query, {application_name_first, application_name_later},
+        summary, events, rejected, error));
+    CHECK(events.size() == 1);
+    CHECK(events[0].total_ml == "1600");
+    CHECK(events[0].all_patient_names == "无名氏 → 示例姓名");
+    CHECK(events[0].patient_name == "示例姓名");
+    CHECK(events[0].patient_name_count == 2);
+    CHECK(events[0].multiple_patient_names);
+    CHECK(events[0].complete);
+    CHECK(events[0].data_status == "完整");
+    CHECK(events[0].components.size() == 2);
+    CHECK(events[0].components[0].patient_name == "无名氏");
+    CHECK(events[0].components[1].patient_name == "示例姓名");
+
     const std::vector<search::MassiveTransfusionRawRow> component_filter_raw{
         make_row("7", "C1", "P4", "2026-08-01 12:00:00", "未审核", "71", "红细胞", "8", "U"),
         make_row("7", "C1", "P4", "2026-08-01 12:00:00", "未审核", "72", "机采血小板", "1", "治疗量", "4"),
@@ -265,6 +291,32 @@ int main() {
     CHECK(saw_first_window);
     CHECK(saw_boundary);
     CHECK(saw_application_anomaly);
+
+    auto actual_name_first = make_actual_row(
+        "C-N1", "A-N1", "P-ACTUAL-NAME", "B-N1", "2026-08-01 08:00:00",
+        "红细胞", "4", "U");
+    actual_name_first.patient_name = "无名氏";
+    auto actual_name_later = make_actual_row(
+        "C-N2", "A-N2", "P-ACTUAL-NAME", "B-N2", "2026-08-01 13:00:00",
+        "血浆", "800", "ML", "2");
+    actual_name_later.patient_name = "示例姓名";
+    summary = {};
+    events.clear();
+    rejected.clear();
+    CHECK(search::build_actual_massive_transfusion_statistics(
+        query, {actual_name_first, actual_name_later},
+        summary, events, rejected, error));
+    CHECK(events.size() == 1);
+    CHECK(events[0].total_ml == "1600");
+    CHECK(events[0].all_patient_names == "无名氏 → 示例姓名");
+    CHECK(events[0].patient_name == "示例姓名");
+    CHECK(events[0].patient_name_count == 2);
+    CHECK(events[0].multiple_patient_names);
+    CHECK(events[0].complete);
+    CHECK(events[0].data_status == "完整");
+    CHECK(events[0].components.size() == 2);
+    CHECK(events[0].components[0].patient_name == "无名氏");
+    CHECK(events[0].components[1].patient_name == "示例姓名");
 
     auto actual_plasma_name = make_actual_row(
         "C15", "A15", "P17", "B15", "2026-08-01 17:00:00",

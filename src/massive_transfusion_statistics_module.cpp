@@ -62,6 +62,9 @@ enum EventColumn {
     EVENT_CAMPUS,
     EVENT_PATIENT_NO,
     EVENT_PATIENT_NAME,
+    EVENT_ALL_PATIENT_NAMES,
+    EVENT_PATIENT_NAME_COUNT,
+    EVENT_MULTIPLE_PATIENT_NAMES,
     EVENT_PATIENT_TYPE,
     EVENT_FIRST_TIME,
     EVENT_WINDOW_END,
@@ -81,7 +84,8 @@ enum EventColumn {
 };
 
 constexpr Column EVENT_COLUMNS[] = {
-    {L"结果", 90}, {L"院区", 65}, {L"病人号", 125}, {L"姓名", 85},
+    {L"结果", 90}, {L"院区", 65}, {L"病人号", 125}, {L"姓名", 105},
+    {L"事件内全部姓名", 240}, {L"姓名数", 65}, {L"是否多姓名", 90},
     {L"患者类型", 85}, {L"事件起始时间", 145}, {L"窗口结束时间", 145},
     {L"最后计量时间", 145}, {L"折算总量(ml)", 115}, {L"关联申请单", 95},
     {L"计量项/血袋", 95}, {L"核查记录", 95}, {L"首袋关联申请单", 155},
@@ -295,6 +299,7 @@ bool isDefaultEventColumn(int column) {
         case EVENT_CAMPUS:
         case EVENT_PATIENT_NO:
         case EVENT_PATIENT_NAME:
+        case EVENT_PATIENT_NAME_COUNT:
         case EVENT_FIRST_TIME:
         case EVENT_WINDOW_END:
         case EVENT_TOTAL_ML:
@@ -453,6 +458,9 @@ std::string eventCell(const EventRow& row, int column) {
         case EVENT_CAMPUS: return row.campus;
         case EVENT_PATIENT_NO: return row.patient_no;
         case EVENT_PATIENT_NAME: return row.patient_name;
+        case EVENT_ALL_PATIENT_NAMES: return row.all_patient_names;
+        case EVENT_PATIENT_NAME_COUNT: return std::to_string(row.patient_name_count);
+        case EVENT_MULTIPLE_PATIENT_NAMES: return row.multiple_patient_names ? "是" : "否";
         case EVENT_PATIENT_TYPE: return row.patient_no_type;
         case EVENT_FIRST_TIME: return row.first_apply_time;
         case EVENT_WINDOW_END: return row.window_end_time;
@@ -508,6 +516,13 @@ std::string componentCell(const ComponentRow& row, int column) {
         case COMPONENT_DATA_STATUS: return row.data_status;
         default: return {};
     }
+}
+
+std::string earlierPatientNames(const EventRow& event) {
+    if (!event.multiple_patient_names) return {};
+    const size_t lastSeparator = event.all_patient_names.rfind(" → ");
+    return lastSeparator == std::string::npos
+        ? std::string() : event.all_patient_names.substr(0, lastSeparator);
 }
 
 void setStatus(State* state, const std::wstring& text) {
@@ -575,13 +590,16 @@ void refreshDetailContext(State* state) {
         return;
     }
     const auto& event = state->eventRows[static_cast<size_t>(selected)];
-    const std::wstring itemTitle = state->loadedStatisticBasis == "actual" ? L"血袋：" : L"计量项：";
+    const std::wstring itemTitle = state->loadedStatisticBasis == "actual" ? L"袋数：" : L"项数：";
+    const std::string otherNames = earlierPatientNames(event);
+    std::wstring patientText = event.patient_name.empty()
+        ? L"姓名为空" : search::utf8_to_wide(event.patient_name);
+    if (!otherNames.empty()) {
+        patientText += L"（" + search::utf8_to_wide(otherNames) + L"）";
+    }
     const std::wstring text =
-        L"患者：" + search::utf8_to_wide(event.patient_name) + L"（" +
-        search::utf8_to_wide(event.patient_no) + L"）  事件：" +
-        search::utf8_to_wide(event.first_apply_time) + L" 至 " +
-        search::utf8_to_wide(event.window_end_time) + L"  折算量：" +
-        search::utf8_to_wide(event.total_ml) + L" ml  " + itemTitle +
+        patientText + L"  |  " + search::utf8_to_wide(event.patient_no) + L"  |  " +
+        search::utf8_to_wide(event.total_ml) + L" ml  |  " + itemTitle +
         std::to_wstring(event.component_count);
     SetWindowTextW(state->detailContext, text.c_str());
 }

@@ -38,6 +38,27 @@ bool is_known_composition_type_id(const std::string& value) {
            value == kPlateletCompositionTypeId;
 }
 
+void collect_event_patient_name(const std::string& value,
+                                std::vector<std::string>& ordered_names,
+                                std::set<std::string>& seen_names) {
+    const std::string name = trim(value);
+    if (!name.empty() && seen_names.insert(name).second) {
+        ordered_names.push_back(name);
+    }
+}
+
+void finalize_event_patient_names(MassiveTransfusionEventRow& event,
+                                  const std::vector<std::string>& ordered_names) {
+    event.all_patient_names.clear();
+    for (const auto& name : ordered_names) {
+        if (!event.all_patient_names.empty()) event.all_patient_names += " → ";
+        event.all_patient_names += name;
+    }
+    event.patient_name_count = static_cast<int>(ordered_names.size());
+    event.multiple_patient_names = ordered_names.size() > 1;
+    event.patient_name = ordered_names.empty() ? std::string() : ordered_names.back();
+}
+
 std::string sql_escape(std::string value) {
     size_t pos = 0;
     while ((pos = value.find('\'', pos)) != std::string::npos) {
@@ -4531,7 +4552,6 @@ bool build_massive_transfusion_statistics(
             event.event_id = anchor->patient_no + "@" + anchor->apply_time;
             event.campus = campus_for_dept(anchor->apply_dept);
             event.patient_no = anchor->patient_no;
-            event.patient_name = anchor->patient_name;
             event.patient_no_type = anchor->patient_no_type;
             event.first_apply_time = anchor->apply_time;
             event.window_end_time = format_datetime(window_end);
@@ -4542,10 +4562,14 @@ bool build_massive_transfusion_statistics(
             event.application_count = static_cast<int>(next - index);
 
             std::set<std::string> statuses;
+            std::set<std::string> seen_patient_names;
+            std::vector<std::string> ordered_patient_names;
             std::map<std::string, double> composition_totals;
             double total_ml = 0.0;
             for (size_t app_index = index; app_index < next; ++app_index) {
                 const Application& app = *apps[app_index];
+                collect_event_patient_name(
+                    app.patient_name, ordered_patient_names, seen_patient_names);
                 if (!event.apply_form_nos.empty()) event.apply_form_nos += ";";
                 event.apply_form_nos += app.apply_form_no;
                 statuses.insert(app.apply_status);
@@ -4573,6 +4597,7 @@ bool build_massive_transfusion_statistics(
                     event.components.push_back(std::move(detail));
                 }
             }
+            finalize_event_patient_names(event, ordered_patient_names);
             event.total_ml = format_number(total_ml);
             event.qualifies = query.threshold_inclusive
                 ? total_ml >= query.threshold_ml
@@ -4917,7 +4942,6 @@ bool build_actual_massive_transfusion_statistics(
             event.event_id = patient.first + "@" + anchor_time;
             event.campus = campus_for_dept(anchor->apply_dept);
             event.patient_no = patient.first;
-            event.patient_name = trim(anchor->patient_name);
             event.patient_no_type = trim(anchor->patient_no_type);
             event.first_apply_time = anchor_time;
             event.window_end_time = format_datetime(window_end);
@@ -4928,10 +4952,14 @@ bool build_actual_massive_transfusion_statistics(
 
             std::set<std::string> form_nos;
             std::set<std::string> departments;
+            std::set<std::string> seen_patient_names;
+            std::vector<std::string> ordered_patient_names;
             std::map<std::string, double> composition_totals;
             double total_ml = 0.0;
             for (size_t bag_index = index; bag_index < next; ++bag_index) {
                 const auto& row = *bags[bag_index];
+                collect_event_patient_name(
+                    row.patient_name, ordered_patient_names, seen_patient_names);
                 auto detail = base_detail(row);
                 detail.event_id = event.event_id;
                 detail.counted = true;
@@ -5005,6 +5033,7 @@ bool build_actual_massive_transfusion_statistics(
                 }
                 event.components.push_back(std::move(detail));
             }
+            finalize_event_patient_names(event, ordered_patient_names);
             event.application_count = static_cast<int>(form_nos.size());
             for (const auto& form : form_nos) {
                 if (!event.apply_form_nos.empty()) event.apply_form_nos += ";";

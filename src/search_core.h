@@ -750,7 +750,8 @@ struct MassiveTransfusionEventRow {
     std::string event_id;
     std::string campus;
     std::string patient_no;
-    std::string patient_name;
+    std::string patient_name;          // 列表姓名；取事件时间顺序中最后出现的非空姓名
+    std::string all_patient_names;     // 事件内去重后的全部非空姓名，按首次出现顺序连接
     std::string patient_no_type;
     std::string first_apply_time;
     std::string window_end_time;
@@ -768,9 +769,11 @@ struct MassiveTransfusionEventRow {
     int rejected_application_count = 0;
     int issue_count = 0;
     int audit_count = 0;
+    int patient_name_count = 0;
     bool qualifies = false;
     bool complete = true;
     bool cross_department = false;
+    bool multiple_patient_names = false;
     std::vector<MassiveTransfusionComponentDetailRow> components;
 };
 
