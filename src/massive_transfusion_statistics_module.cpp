@@ -34,7 +34,7 @@ namespace {
 constexpr const wchar_t* WND_CLASS = L"MassiveTransfusionStatisticsModuleChild";
 constexpr const wchar_t* WINDOW_TITLE = L"大量输血统计";
 constexpr const wchar_t* PROP_STATE = L"MassiveTransfusionStatisticsSt";
-constexpr const char* RULE_VERSION = "v3";
+constexpr const char* RULE_VERSION = "v4";
 constexpr UINT WM_QUERY_LOADED = WM_APP + 0x576;
 
 enum ControlId {
@@ -111,6 +111,7 @@ enum ComponentColumn {
     COMPONENT_OUT_COUNT,
     COMPONENT_COUNTED,
     COMPONENT_NAME,
+    COMPONENT_CATEGORY_ID,
     COMPONENT_NUM,
     COMPONENT_UNIT,
     COMPONENT_FACTOR,
@@ -129,7 +130,7 @@ constexpr Column COMPONENT_COLUMNS[] = {
     {L"实际输血状态", 105}, {L"交叉配血ID", 105}, {L"血袋ID", 105},
     {L"血袋号", 135}, {L"产品码", 120}, {L"配血时间", 145},
     {L"出库时间", 145}, {L"血库审核时间", 145}, {L"出库记录数", 95},
-    {L"是否计量", 80}, {L"血液制品", 190}, {L"数量/规格", 90},
+    {L"是否计量", 80}, {L"血液制品", 190}, {L"成分类型ID", 95}, {L"数量/规格", 90},
     {L"原单位", 75}, {L"换算因子", 85}, {L"折算量(ml)", 105},
     {L"申请科室", 175}, {L"床号", 65}, {L"申请医生", 90}, {L"数据状态", 190},
 };
@@ -496,6 +497,7 @@ std::string componentCell(const ComponentRow& row, int column) {
             ? std::to_string(row.blood_out_record_count) : std::string{};
         case COMPONENT_COUNTED: return row.counted ? "是" : "否";
         case COMPONENT_NAME: return row.composition;
+        case COMPONENT_CATEGORY_ID: return row.composition_category_id;
         case COMPONENT_NUM: return row.apply_num;
         case COMPONENT_UNIT: return row.apply_unit;
         case COMPONENT_FACTOR: return row.conversion_factor;

@@ -26,6 +26,18 @@
 namespace search {
 namespace {
 
+constexpr const char* kRedCellCompositionTypeId = "1";
+constexpr const char* kPlasmaCompositionTypeId = "2";
+constexpr const char* kCryoprecipitateCompositionTypeId = "3";
+constexpr const char* kPlateletCompositionTypeId = "4";
+
+bool is_known_composition_type_id(const std::string& value) {
+    return value == kRedCellCompositionTypeId ||
+           value == kPlasmaCompositionTypeId ||
+           value == kCryoprecipitateCompositionTypeId ||
+           value == kPlateletCompositionTypeId;
+}
+
 std::string sql_escape(std::string value) {
     size_t pos = 0;
     while ((pos = value.find('\'', pos)) != std::string::npos) {
@@ -4336,6 +4348,7 @@ bool build_massive_transfusion_statistics(
 
     struct Component {
         std::string composition;
+        std::string composition_big_id;
         std::string apply_num;
         std::string apply_unit;
     };
@@ -4398,6 +4411,7 @@ bool build_massive_transfusion_statistics(
             if (!app.component_keys.insert(component_key).second) continue;
             Component component;
             component.composition = trim(raw.composition);
+            component.composition_big_id = trim(raw.composition_big_id);
             component.apply_num = trim(raw.apply_num);
             component.apply_unit = trim(raw.apply_unit);
             app.components.push_back(std::move(component));
@@ -4450,23 +4464,30 @@ bool build_massive_transfusion_statistics(
             return detail;
         }
         detail.composition = component->composition;
+        detail.composition_category_id = component->composition_big_id;
         detail.apply_num = component->apply_num;
         detail.apply_unit = component->apply_unit;
-        const bool is_platelet = contains_text(component->composition, "血小板");
-        const bool is_cryoprecipitate = contains_text(component->composition, "冷沉淀");
+        const bool known_category = is_known_composition_type_id(component->composition_big_id);
+        const bool is_cryoprecipitate =
+            component->composition_big_id == kCryoprecipitateCompositionTypeId;
+        const bool is_platelet = component->composition_big_id == kPlateletCompositionTypeId;
         detail.excluded_by_component_filter =
             !query.include_platelet_and_cryoprecipitate &&
             (is_platelet || is_cryoprecipitate);
         if (detail.excluded_by_component_filter) detail.counted = false;
         const std::string unit = normalized_unit(component->apply_unit);
         double factor = 0.0;
-        if (unit == "ML") factor = 1.0;
+        if (!known_category) factor = 0.0;
+        else if (unit == "ML") factor = 1.0;
         else if (unit == "U" && is_cryoprecipitate) factor = 20.0;
         else if (unit == "U") factor = 200.0;
         else if (unit == "治疗量") factor = 250.0;
         double amount = 0.0;
         const bool valid_amount = parse_number(component->apply_num, amount);
-        if (factor <= 0.0) {
+        if (!known_category) {
+            detail.counted = false;
+            detail.data_status = "成分大类ID缺失或未识别，不计量";
+        } else if (factor <= 0.0) {
             detail.counted = false;
             detail.data_status = "未识别申请单位";
         } else if (!valid_amount) {
@@ -4777,6 +4798,7 @@ bool build_actual_massive_transfusion_statistics(
         detail.bed_no = trim(row.bed_no);
         detail.apply_doctor = trim(row.apply_doctor);
         detail.composition = trim(row.composition);
+        detail.composition_category_id = trim(row.composition_type_id);
         detail.apply_num = trim(row.norm);
         detail.apply_unit = trim(row.unit);
         detail.cross_match_id = trim(row.cross_match_id);
@@ -4935,13 +4957,18 @@ bool build_actual_massive_transfusion_statistics(
                     if (campus_matches(audit.campus)) audit_rows.push_back(std::move(audit));
                 }
 
-                const bool is_platelet = contains_text(detail.composition, "血小板");
-                const bool is_cryo = contains_text(detail.composition, "冷沉淀");
+                const bool known_category =
+                    is_known_composition_type_id(detail.composition_category_id);
+                const bool is_cryo =
+                    detail.composition_category_id == kCryoprecipitateCompositionTypeId;
+                const bool is_platelet =
+                    detail.composition_category_id == kPlateletCompositionTypeId;
                 detail.excluded_by_component_filter =
                     !query.include_platelet_and_cryoprecipitate && (is_platelet || is_cryo);
                 const std::string unit = normalized_unit(detail.apply_unit);
                 double factor = 0.0;
-                if (unit == "ML") factor = 1.0;
+                if (!known_category) factor = 0.0;
+                else if (unit == "ML") factor = 1.0;
                 else if (unit == "U" && is_cryo) factor = 20.0;
                 else if (unit == "U") factor = 200.0;
                 else if (unit == "治疗量") factor = 250.0;
@@ -4953,9 +4980,9 @@ bool build_actual_massive_transfusion_statistics(
                 if (detail.excluded_by_component_filter) {
                     detail.counted = false;
                     detail.data_status = "未勾选，不计量";
-                } else if (detail.composition.empty()) {
+                } else if (!known_category) {
                     detail.counted = false;
-                    detail.data_status = "血袋成分为空，容量无法折算";
+                    detail.data_status = "成分类型ID缺失或未识别，不计量";
                 } else if (factor <= 0.0) {
                     detail.counted = false;
                     detail.data_status = "血袋容量单位缺失或未识别";
@@ -4967,7 +4994,7 @@ bool build_actual_massive_transfusion_statistics(
                     ++event.component_count;
                     const double converted = amount * factor;
                     total_ml += converted;
-                    composition_totals[detail.composition] += converted;
+                    composition_totals[detail.composition.empty() ? "未命名制品" : detail.composition] += converted;
                 }
                 if (!detail.excluded_by_component_filter && !detail.counted) {
                     event.complete = false;
@@ -5114,7 +5141,8 @@ bool query_massive_transfusion_statistics(
             << "isnull(LTRIM(RTRIM(a.Apply_BedNo)),''),isnull(LTRIM(RTRIM(a.Apply_Doctor)),''),"
             << "isnull(CONVERT(varchar(32),bi.ID),''),isnull(LTRIM(RTRIM(bi.BloodBagNO)),''),"
             << "isnull(LTRIM(RTRIM(bi.CmpProductCode)),''),isnull(LTRIM(RTRIM(comp.Blood_Composition)),''),"
-            << "isnull(LTRIM(RTRIM(CONVERT(varchar(32),comp.Norm))),''),isnull(LTRIM(RTRIM(comp.Unit)),'')"
+            << "isnull(LTRIM(RTRIM(CONVERT(varchar(32),comp.Norm))),''),isnull(LTRIM(RTRIM(comp.Unit)),''),"
+            << "isnull(CONVERT(varchar(32),comp.CompositionTypeID),'')"
             << " FROM CandidateCrossMatch cm"
             << " LEFT JOIN LS_XK_BloodRequestApply a WITH (NOLOCK)"
             << " ON a.ApplyFormNO=cm.ApplyFormNO"
@@ -5141,6 +5169,7 @@ bool query_massive_transfusion_statistics(
             row.blood_info_id = fetch_column(stmt, 21); row.blood_bag_no = fetch_column(stmt, 22);
             row.product_code = fetch_column(stmt, 23); row.composition = fetch_column(stmt, 24);
             row.norm = fetch_column(stmt, 25); row.unit = fetch_column(stmt, 26);
+            row.composition_type_id = fetch_column(stmt, 27);
             raw_rows.push_back(std::move(row));
         }
         SQLFreeHandle(SQL_HANDLE_STMT, stmt);

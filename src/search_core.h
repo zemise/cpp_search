@@ -682,6 +682,7 @@ struct ActualTransfusionRawRow {
     std::string composition;
     std::string norm;
     std::string unit;
+    std::string composition_type_id;
 };
 
 struct MassiveTransfusionRawRow {
@@ -721,6 +722,7 @@ struct MassiveTransfusionComponentDetailRow {
     std::string bed_no;
     std::string apply_doctor;
     std::string composition;
+    std::string composition_category_id;
     std::string apply_num;
     std::string apply_unit;
     std::string conversion_factor;

@@ -122,8 +122,12 @@ packet size=4096;user id=...;password=...;data source=...;persist security info=
 | `JC_EMPLOYEE_PROPERTY` | 人员字典，用于“检验者”和“审核者”显示 | `EMPLOYEE_ID`, `NAME`, `D_CODE`, `YS_CODE`, `TYPENAME` |
 | `LS_AS_RESULTP` | 原候选检验者来源，但实测覆盖率低，当前不作为主来源 | `REP_NO`, `EditName`, `ChkNAME`, `TXM_NO` |
 | `LS_XK_BloodRequestApply` | 输血申请主表，输血结果查询列表主来源 | `ApplyFormNO`, `Apply_Time`, `Plan_Date`, `ApplyForm_Statue`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `TranProperty` |
-| `LS_XK_BloodRequestApplySon` | 输血申请子表，用于按申请单聚合申请成分 | `ApplyFormNO`, `ApplyComposition`, `ApplyNum`, `ApplyUnit` |
-| `LS_XK_BloodCrossMatch` | 交叉配血记录表，用于按输血申请号关联病人和配血审核信息 | `ApplyFormNO`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `VerifyState`, `Match_Date` |
+| `LS_XK_BloodRequestApplySon` | 输血申请子表，用于按申请单聚合申请成分；大量输血申请量对照按成分大类 ID 分类 | `ApplyFormNO`, `CompositionBig_ID`, `ApplyComposition`, `ApplyNum`, `ApplyUnit` |
+| `LS_XK_BloodCrossMatch` | 交叉配血记录表，用于按输血申请号关联病人和配血审核信息 | `ApplyFormNO`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `VerifyState`, `BloodInID`, `Match_Date` |
+| `LS_XK_BloodInfo` | 血袋库存表，通过成分 ID 关联实际血袋规格和类型 | `ID`, `CompositionID`, `BloodBagNO`, `CmpProductCode` |
+| `LS_XK_BloodOutInfo` | 血袋出库表，提供大量输血默认事件时间 | `BloodInID`, `BloodOut_Date` |
+| `LS_XK_B_CompositionInfo` | 血液成分字典；实际输血量按类型 ID 分类，名称仅展示 | `ID`, `Blood_Composition`, `Norm`, `Unit`, `CompositionTypeID`, `Del_Flat` |
+| `LS_XK_B_CompositionType` | 成分类型字典；现场确认编码 `1=红细胞、2=血浆、3=冷沉淀、4=血小板` | `ID`, `CompositionType` |
 
 ### 临床申请科室映射
 
@@ -219,7 +223,8 @@ ISNULL(Apply_Purpose,'') LIKE '%备血%'
 - `LS_XK_BloodCrossMatch.BloodInID = LS_XK_BloodInfo.ID`：获取 `BloodBagNO / CmpProductCode`，并继续关联血型、Rh、成分和来源字典。
 - `LS_XK_BloodInfo.BloodTypeID = LS_XK_B_TypeInfo.ID`：获取 `Blood_Type`。
 - `LS_XK_BloodInfo.RhD_ID = LS_XK_B_RhInfo.ID`：获取 `Blood_RH`。
-- `LS_XK_BloodInfo.CompositionID = LS_XK_B_CompositionInfo.ID`：获取 `Blood_Composition / Norm / Unit`。
+- `LS_XK_BloodInfo.CompositionID = LS_XK_B_CompositionInfo.ID`：获取 `Blood_Composition / Norm / Unit / CompositionTypeID`；实际输血量只按 `CompositionTypeID` 分类。
+- `LS_XK_B_CompositionInfo.CompositionTypeID = LS_XK_B_CompositionType.ID`：逻辑关联成分类型；现场未发现物理外键约束。
 - `LS_XK_BloodInfo.SourceID = LS_XK_B_SourceInfo.ID`：获取 `Sources_Blood`。
 
 ### 查询检验结果报告列表
@@ -576,16 +581,16 @@ T0 <= Apply_Time < T0 + 24小时
 
 每张有效申请最多进入一个事件；当前窗口结束后，下一张有效申请建立新的独立事件。未审核、已审核和已完结申请参与事件和申请量统计；已驳回申请不建立事件、不贡献申请量，落入已有事件窗口时随事件成分展示，否则在独立已驳回核查视图展示；已删除申请不展示。
 
-申请量只读取子表 `ApplyComposition / ApplyNum / ApplyUnit`，按唯一子表 `ID` 去重。子表没有申请成分时不读取主表同名冗余字段回退，而是将事件标记为总量不完整。规则版本 `v2` 按申请成分名称和单位折算：
+申请量只读取子表 `CompositionBig_ID / ApplyComposition / ApplyNum / ApplyUnit`，按唯一子表 `ID` 去重。子表没有申请成分时不读取主表同名冗余字段回退，而是将事件标记为总量不完整。规则版本 `v4` 使用 `CompositionBig_ID` 作为唯一制品分类依据，名称仅用于展示：
 
 | 申请成分识别 | 原单位 | 毫升折算 |
 | --- | --- | ---: |
-| 任意制品 | `ML` | `ApplyNum × 1` |
-| 名称包含“冷沉淀” | `U` | `ApplyNum × 20` |
-| 其他制品 | `U` | `ApplyNum × 200` |
-| 任意制品 | `治疗量` | `ApplyNum × 250` |
+| 已识别成分大类 | `ML` | `ApplyNum × 1` |
+| `CompositionBig_ID=3`（冷沉淀） | `U` | `ApplyNum × 20` |
+| 其他已识别成分大类 | `U` | `ApplyNum × 200` |
+| 已识别成分大类 | `治疗量` | `ApplyNum × 250` |
 
-页面提供默认不勾选的“包括血小板和冷沉淀”。不勾选时，`ApplyComposition` 包含“血小板”或“冷沉淀”的行保留在成分明细和 Excel 工作簿中，但不计入事件总量、计量制品项，也不因该行本身将事件标记为总量不完整；勾选后正常参与统计。Excel 工作簿同时记录本次开关状态和规则版本。
+页面提供默认不勾选的“包括血小板和冷沉淀”。不勾选时，`CompositionBig_ID=3/4` 的行保留在成分明细和 Excel 工作簿中，但不计入事件总量、计量制品项，也不因该行本身将事件标记为总量不完整；勾选后正常参与统计。`ApplyComposition` 不参与分类、旧数据兜底或异常名称匹配；类型 ID 缺失或未知时不计量并使事件总量不完整。Excel 工作簿同时记录类型 ID、开关状态和规则版本。
 
 查询参数携带阈值毫升数和比较方式，默认条件为 `>=1600ml`；阈值必须大于 `0` 且页面限制最多两位小数，比较方式可选 `>=` 或 `>`。已知折算量满足本次条件时事件命中大量输血；即使另有异常成分，只要已知量已经满足条件，事件仍命中并标记总量不完整。已知量未满足条件且存在无法折算或子表缺失时，事件进入折算异常结果，不能直接判定未命中。查询状态及两级 Excel 工作簿均记录实际统计条件。
 
@@ -612,6 +617,6 @@ CandidateCrossMatch
 
 SQL 候选集允许安全地适度多取；C++ 聚合入口会再次按原语义精确过滤：所选时间非空时使用所选时间范围，所选时间为空时按 `Match_Date -> BloodOut_Date -> Apply_Time -> Check_Date` 的优先级取第一个非空辅助时间。这样既保留缺失时间异常核查，又避免范围外记录污染血袋去重。申请表仍采用 `a.ApplyFormNO=cm.ApplyFormNO` 直接等值连接，去空格只用于返回后的显示和 C++ 分组。
 
-实际口径可选 `Match_Date / BloodOut_Date / Apply_Time / Check_Date` 作为事件时间，默认 `BloodOut_Date`。同一患者按所选时间升序，以第一袋为起点建立左闭右开的24小时窗口；所选时间为空时不回退，进入时间缺失核查。`BloodOutInfo` 多行时只取最早出库时间并标记核查，不能放大血袋数。事件的“实际输血制品构成”只按 `CompositionInfo.Blood_Composition + Norm + Unit` 折算后的实际血袋毫升数汇总，不读取申请子表成分；申请量对照分支才按申请成分生成“申请制品构成”。查询状态同时显示 SQL 返回原始记录数和总耗时。
+实际口径可选 `Match_Date / BloodOut_Date / Apply_Time / Check_Date` 作为事件时间，默认 `BloodOut_Date`。同一患者按所选时间升序，以第一袋为起点建立左闭右开的24小时窗口；所选时间为空时不回退，进入时间缺失核查。`BloodOutInfo` 多行时只取最早出库时间并标记核查，不能放大血袋数。实际制品分类只使用 `CompositionInfo.CompositionTypeID`：`1=红细胞、2=血浆、3=冷沉淀、4=血小板`；`Blood_Composition` 仅用于展示，因此 `CompositionTypeID=2` 的“去冷沉淀冰冻血浆”按血浆正常计量。事件的“实际输血制品构成”按实际血袋名称和折算量汇总，不读取申请子表成分；申请量对照分支才生成“申请制品构成”。查询状态同时显示 SQL 返回原始记录数和总耗时。
 
-`VerifyState='未审核'`、未知状态、逻辑删除的交叉配血记录不进入正式统计而进入核查；申请单已删除、已驳回、缺失或病人号不一致不覆盖已审核的实际输血事实，血袋仍计量并标记申请单异常。实际容量读取 `BloodInfo.CompositionID -> CompositionInfo.Norm + Unit`，折算仍使用 `ML×1 / 普通U×200 / 冷沉淀U×20 / 治疗量×250`。事件、血袋明细和 Excel 工作簿均记录统计口径、事件时间口径、阈值、开关和异常状态。
+`VerifyState='未审核'`、未知状态、逻辑删除的交叉配血记录不进入正式统计而进入核查；申请单已删除、已驳回、缺失或病人号不一致不覆盖已审核的实际输血事实，血袋仍计量并标记申请单异常。实际容量及类型读取 `BloodInfo.CompositionID -> CompositionInfo.Norm + Unit + CompositionTypeID`，折算使用 `ML×1 / 普通U×200 / 类型3冷沉淀U×20 / 治疗量×250`。类型 ID 缺失或未知时不使用名称兜底，该项不计量并使事件总量不完整。事件、血袋明细和 Excel 工作簿均记录统计口径、事件时间口径、类型 ID、阈值、开关和异常状态。

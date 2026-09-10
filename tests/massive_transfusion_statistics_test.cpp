@@ -16,7 +16,8 @@ namespace {
 search::MassiveTransfusionRawRow make_row(
     const char* main_id, const char* form, const char* patient,
     const char* time, const char* status, const char* son,
-    const char* composition, const char* number, const char* unit) {
+    const char* composition, const char* number, const char* unit,
+    const char* composition_big_id = "1") {
     search::MassiveTransfusionRawRow value;
     value.main_id = main_id;
     value.apply_form_no = form;
@@ -29,13 +30,15 @@ search::MassiveTransfusionRawRow make_row(
     value.composition = composition;
     value.apply_num = number;
     value.apply_unit = unit;
+    value.composition_big_id = composition_big_id;
     return value;
 }
 
 search::ActualTransfusionRawRow make_actual_row(
     const char* cross_id, const char* form, const char* patient,
     const char* bag_id, const char* match_time,
-    const char* composition, const char* norm, const char* unit) {
+    const char* composition, const char* norm, const char* unit,
+    const char* composition_type_id = "1") {
     search::ActualTransfusionRawRow value;
     value.cross_match_id = cross_id;
     value.apply_form_no = form;
@@ -53,6 +56,7 @@ search::ActualTransfusionRawRow make_actual_row(
     value.composition = composition;
     value.norm = norm;
     value.unit = unit;
+    value.composition_type_id = composition_type_id;
     return value;
 }
 
@@ -112,8 +116,8 @@ int main() {
 
     const std::vector<search::MassiveTransfusionRawRow> component_filter_raw{
         make_row("7", "C1", "P4", "2026-08-01 12:00:00", "未审核", "71", "红细胞", "8", "U"),
-        make_row("7", "C1", "P4", "2026-08-01 12:00:00", "未审核", "72", "机采血小板", "1", "治疗量"),
-        make_row("7", "C1", "P4", "2026-08-01 12:00:00", "未审核", "73", "混合冷沉淀凝血因子", "1", "U"),
+        make_row("7", "C1", "P4", "2026-08-01 12:00:00", "未审核", "72", "机采血小板", "1", "治疗量", "4"),
+        make_row("7", "C1", "P4", "2026-08-01 12:00:00", "未审核", "73", "混合冷沉淀凝血因子", "1", "U", "3"),
     };
     summary = {};
     events.clear();
@@ -129,12 +133,43 @@ int main() {
         ++excluded_count;
         CHECK(!component.counted);
         CHECK(component.data_status == "未勾选，不计量");
-        if (component.composition.find("冷沉淀") != std::string::npos) {
+        if (component.composition_category_id == "3") {
             CHECK(component.conversion_factor == "20");
             CHECK(component.converted_ml == "20");
         }
     }
     CHECK(excluded_count == 2);
+
+    const std::vector<search::MassiveTransfusionRawRow> plasma_name_raw{
+        make_row("11", "E1", "P16", "2026-08-01 16:00:00", "已审核", "111",
+                 "去冷沉淀冰冻血浆", "1600", "ML", "2"),
+    };
+    summary = {};
+    events.clear();
+    rejected.clear();
+    CHECK(search::build_massive_transfusion_statistics(
+        query, plasma_name_raw, summary, events, rejected, error));
+    CHECK(summary.event_count == 1);
+    CHECK(events.size() == 1);
+    CHECK(events[0].total_ml == "1600");
+    CHECK(events[0].components[0].counted);
+    CHECK(!events[0].components[0].excluded_by_component_filter);
+
+    const std::vector<search::MassiveTransfusionRawRow> missing_category_raw{
+        make_row("12", "E2", "P18", "2026-08-01 17:00:00", "已审核", "121",
+                 "冷沉淀凝血因子", "100", "U", ""),
+    };
+    summary = {};
+    events.clear();
+    rejected.clear();
+    CHECK(search::build_massive_transfusion_statistics(
+        query, missing_category_raw, summary, events, rejected, error));
+    CHECK(summary.event_count == 0);
+    CHECK(events.size() == 1);
+    CHECK(events[0].total_ml == "0");
+    CHECK(!events[0].components[0].counted);
+    CHECK(!events[0].components[0].excluded_by_component_filter);
+    CHECK(events[0].components[0].conversion_factor.empty());
 
     query.include_platelet_and_cryoprecipitate = true;
     summary = {};
@@ -190,7 +225,7 @@ int main() {
         make_actual_row("C1", "A1", "P8", "B1", "2026-08-01 08:00:00", "红细胞", "4", "U"),
         make_actual_row("C2", "A2", "P8", "B2", "2026-08-02 07:59:59", "血浆", "800", "ML"),
         make_actual_row("C3", "A3", "P8", "B3", "2026-08-02 08:00:00", "血浆", "1600", "ML"),
-        make_actual_row("C4", "A4", "P9", "B4", "2026-08-01 09:00:00", "冷沉淀", "10", "U"),
+        make_actual_row("C4", "A4", "P9", "B4", "2026-08-01 09:00:00", "冷沉淀", "10", "U", "3"),
     };
     auto unreviewed = make_actual_row("C5", "A5", "P8", "B5", "2026-08-01 10:00:00", "红细胞", "10", "U");
     unreviewed.verify_state = "未审核";
@@ -230,6 +265,49 @@ int main() {
     CHECK(saw_first_window);
     CHECK(saw_boundary);
     CHECK(saw_application_anomaly);
+
+    auto actual_plasma_name = make_actual_row(
+        "C15", "A15", "P17", "B15", "2026-08-01 17:00:00",
+        "去冷沉淀冰冻血浆", "1600", "ML", "2");
+    summary = {};
+    events.clear();
+    rejected.clear();
+    CHECK(search::build_actual_massive_transfusion_statistics(
+        query, {actual_plasma_name}, summary, events, rejected, error));
+    CHECK(summary.event_count == 1);
+    CHECK(events.size() == 1);
+    CHECK(events[0].total_ml == "1600");
+    CHECK(events[0].components[0].counted);
+    CHECK(!events[0].components[0].excluded_by_component_filter);
+
+    auto actual_without_name = make_actual_row(
+        "C17", "A17", "P20", "B17", "2026-08-01 17:30:00",
+        "", "1600", "ML", "2");
+    summary = {};
+    events.clear();
+    rejected.clear();
+    CHECK(search::build_actual_massive_transfusion_statistics(
+        query, {actual_without_name}, summary, events, rejected, error));
+    CHECK(summary.event_count == 1);
+    CHECK(events.size() == 1);
+    CHECK(events[0].total_ml == "1600");
+    CHECK(events[0].components[0].counted);
+    CHECK(events[0].composition_summary.find("未命名制品 1600ml") != std::string::npos);
+
+    auto actual_missing_category = make_actual_row(
+        "C16", "A16", "P19", "B16", "2026-08-01 18:00:00",
+        "冷沉淀凝血因子", "100", "U", "");
+    summary = {};
+    events.clear();
+    rejected.clear();
+    CHECK(search::build_actual_massive_transfusion_statistics(
+        query, {actual_missing_category}, summary, events, rejected, error));
+    CHECK(summary.event_count == 0);
+    CHECK(events.size() == 1);
+    CHECK(events[0].total_ml == "0");
+    CHECK(!events[0].components[0].counted);
+    CHECK(!events[0].components[0].excluded_by_component_filter);
+    CHECK(events[0].components[0].conversion_factor.empty());
 
     auto duplicate = make_actual_row("C8", "A8", "P11", "B8", "2026-08-01 13:00:00", "血浆", "1600", "ML");
     auto duplicate_again = duplicate;
