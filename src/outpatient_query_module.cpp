@@ -8,6 +8,7 @@
 #include "search_text.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "window_task.h"
 
 #include <commctrl.h>
 #include <windows.h>
@@ -16,10 +17,11 @@
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
+#include <exception>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -27,7 +29,6 @@ namespace {
 constexpr const wchar_t* WND_CLASS = L"OutpatientQueryModuleChild";
 constexpr const wchar_t* WINDOW_TITLE = L"门诊查询";
 constexpr const wchar_t* PROP_STATE = L"OutpatientQuerySt";
-constexpr UINT WM_OUTPATIENT_QUERY_LOADED = WM_APP + 0x581;
 constexpr COLORREF COLOR_PENDING_BARCODE = RGB(0xFF, 0xFF, 0x54);
 constexpr COLORREF COLOR_WHITE = RGB(0xFF, 0xFF, 0xFF);
 constexpr COLORREF COLOR_BLACK = RGB(0x00, 0x00, 0x00);
@@ -90,6 +91,7 @@ struct OutpatientQueryState {
     HWND status = nullptr;
     HBRUSH bgBrush = nullptr;
     bool querying = false;
+    app::WindowTask queryTask;
     int sortColumn = 12;
     bool sortAscending = false;
     std::vector<search::OutpatientChargeRow> rows;
@@ -382,13 +384,42 @@ void runQuery(HWND hwnd, OutpatientQueryState* st) {
     EnableWindow(st->query, FALSE);
     setStatus(st, L"正在查询门诊收费明细...");
 
-    std::thread([hwnd, query]() {
-        auto* result = new QueryResult();
-        result->ok = search::query_outpatient_charges(query, result->rows, result->error);
-        if (!PostMessageW(hwnd, WM_OUTPATIENT_QUERY_LOADED, 0, reinterpret_cast<LPARAM>(result))) {
-            delete result;
-        }
-    }).detach();
+    const bool queued = st->queryTask.start<QueryResult>(
+        [query] {
+            QueryResult result;
+            result.ok = search::query_outpatient_charges(query, result.rows, result.error);
+            return result;
+        },
+        [hwnd](std::optional<QueryResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<OutpatientQueryState*>(GetPropW(hwnd, PROP_STATE));
+            if (!state) return;
+
+            state->querying = false;
+            EnableWindow(state->query, TRUE);
+            if (error || !result) {
+                setStatus(state, L"查询失败：后台任务异常。");
+                MessageBoxW(hwnd, L"后台查询任务异常。", WINDOW_TITLE, MB_ICONERROR);
+                return;
+            }
+            if (!result->ok) {
+                setStatus(state, L"查询失败：" + search::utf8_to_wide(result->error));
+                MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(),
+                            WINDOW_TITLE, MB_ICONERROR);
+                return;
+            }
+            state->rows = std::move(result->rows);
+            state->sortColumn = 12;
+            state->sortAscending = false;
+            sortRows(state, 12, false);
+            populateList(state);
+            setStatus(state, L"查询完成：" + std::to_wstring(state->rows.size()) + L" 条。");
+        });
+    if (!queued) {
+        st->querying = false;
+        EnableWindow(st->query, TRUE);
+        setStatus(st, L"无法启动后台查询任务。");
+        MessageBoxW(hwnd, L"无法启动后台查询任务。", WINDOW_TITLE, MB_ICONERROR);
+    }
 }
 
 LRESULT CALLBACK searchEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
@@ -496,24 +527,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
         }
-        case WM_OUTPATIENT_QUERY_LOADED: {
-            std::unique_ptr<QueryResult> result(reinterpret_cast<QueryResult*>(lp));
-            if (!st) return 0;
-            st->querying = false;
-            EnableWindow(st->query, TRUE);
-            if (!result->ok) {
-                setStatus(st, L"查询失败：" + search::utf8_to_wide(result->error));
-                MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
-                return 0;
-            }
-            st->rows = std::move(result->rows);
-            st->sortColumn = 12;
-            st->sortAscending = false;
-            sortRows(st, 12, false);
-            populateList(st);
-            setStatus(st, L"查询完成：" + std::to_wstring(st->rows.size()) + L" 条。");
-            return 0;
-        }
         case app::WM_APP_SETTINGS_CHANGED:
         case app::WM_APP_FONT_CHANGED:
             if (st) {
@@ -534,6 +547,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DESTROY:
             if (st) {
+                st->queryTask.cancel();
                 if (st->bgBrush) DeleteObject(st->bgBrush);
                 RemovePropW(hwnd, PROP_STATE);
                 delete st;

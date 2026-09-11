@@ -44,6 +44,7 @@
 #include "update_source.h"
 #include "version.h"
 #include "win32_control_id.h"
+#include "window_task.h"
 namespace {
 
 constexpr int IDM_QUERY        = 1001;
@@ -839,6 +840,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (app::dispatch_window_task_message(msg)) continue;
         if (!TranslateMDISysAccel(g_ctx.mdiClient, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);

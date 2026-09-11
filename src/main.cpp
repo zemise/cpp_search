@@ -14,6 +14,7 @@
 #include "trend_window.h"
 #include "resource.h"
 #include "version.h"
+#include "window_task.h"
 
 #ifndef _WIN32
 #include <iostream>
@@ -428,6 +429,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (app::dispatch_window_task_message(msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
