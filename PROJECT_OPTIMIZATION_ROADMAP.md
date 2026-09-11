@@ -68,7 +68,7 @@ LIS Workbench 当前已经形成较完整的 Windows LIS 工作台：包含检�
 | OPT-003 | P0 | 数据库凭据安全 | 待处理 | 不再明文保存数据库密码 |
 | OPT-004 | P0 | 安装目录权限隔离 | 待处理 | 普通用户不能修改 exe、Updater 和 DLL |
 | OPT-005 | P0 | 日志脱敏与保留策略 | 待处理 | 日志不泄露患者身份和完整 SQL |
-| OPT-006 | P1 | CI 测试发布门禁 | 实施中 | 已配置 Windows CTest 门禁，等待 CI 实际验证 |
+| OPT-006 | P1 | CI 测试发布门禁 | 已完成 | Windows CTest 门禁已配置并通过 push 与 PR 两种触发验证 |
 | OPT-007 | P1 | 核心库平台边界准确化 | 待处理 | 修复声明与实现不一致，不追求过度拆分 |
 | OPT-008 | P1 | ODBC RAII 与参数绑定 | 待处理 | 统一资源、参数、错误、超时和取消 |
 | OPT-009 | P1 | 查询规模和一致性治理 | 待处理 | 避免无限查询和不恰当的 `NOLOCK` |
@@ -812,7 +812,8 @@ docs/adr/                          少量重大架构决策记录，按需创建
 
 - MinGW Windows 全量构建成功，包含主程序、Updater 和测试目标。
 - 本机已有 CTest 中 4 个测试通过；`massive_transfusion_core_tests` 因完整 `search_core` 链接到 Win32 专用 `log.cpp` 而未能在 macOS 原生构建。
-- GitHub Actions 当前没有执行 CTest。
+- 初始审查时 GitHub Actions 没有执行 CTest；现已在打包前构建并运行全部 5 个测试目标。
+- 2026-09-11 GitHub Actions 的 push 与 PR 两次 Windows 工作流均通过，耗时分别约 1 分 56 秒和 2 分 08 秒，确认测试失败会阻断后续打包步骤。
 - Makefile 的 `test` 目标仍为占位跳过。
 - 发现 Qt 趋势窗口异步闭包捕获页面对象和成员引用。
 - 2026-09-11 决定冻结 Qt；该问题降为已知暂缓项，不占用当前 Win32 优化资源。
