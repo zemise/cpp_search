@@ -34,7 +34,8 @@ public:
 };
 
 bool queue(std::unique_ptr<Work> work) noexcept;
-bool post(DWORD uiThreadId, std::unique_ptr<Completion> completion) noexcept;
+HWND dispatcher() noexcept;
+bool post(HWND dispatcherWindow, std::unique_ptr<Completion> completion) noexcept;
 
 template <typename Result, typename Handler>
 class CompletionModel final : public Completion {
@@ -78,12 +79,12 @@ class WorkModel final : public Work {
 public:
     WorkModel(std::weak_ptr<State> state,
               std::uint64_t generation,
-              DWORD uiThreadId,
+              HWND dispatcherWindow,
               Worker worker,
               Handler handler)
         : state_(std::move(state)),
           generation_(generation),
-          uiThreadId_(uiThreadId),
+          dispatcherWindow_(dispatcherWindow),
           worker_(std::move(worker)),
           handler_(std::move(handler)) {}
 
@@ -99,7 +100,7 @@ public:
         try {
             auto completion = std::make_unique<CompletionModel<Result, Handler>>(
                 state_, generation_, std::move(result), std::move(error), std::move(handler_));
-            if (!post(uiThreadId_, std::move(completion))) {
+            if (!post(dispatcherWindow_, std::move(completion))) {
                 abandon();
             }
         } catch (...) {
@@ -117,7 +118,7 @@ private:
 
     std::weak_ptr<State> state_;
     std::uint64_t generation_ = 0;
-    DWORD uiThreadId_ = 0;
+    HWND dispatcherWindow_ = nullptr;
     Worker worker_;
     Handler handler_;
 };
@@ -140,6 +141,9 @@ public:
     bool start(Worker&& worker, Handler&& handler) {
         static_assert(!std::is_void_v<Result>, "WindowTask requires an owned result value");
 
+        HWND dispatcherWindow = window_task_detail::dispatcher();
+        if (!dispatcherWindow) return false;
+
         const auto generation =
             state_->generation.fetch_add(1, std::memory_order_acq_rel) + 1;
         state_->active.store(true, std::memory_order_release);
@@ -149,7 +153,7 @@ public:
         try {
             auto work = std::make_unique<
                 window_task_detail::WorkModel<Result, WorkType, HandlerType>>(
-                state_, generation, GetCurrentThreadId(),
+                state_, generation, dispatcherWindow,
                 std::forward<Worker>(worker), std::forward<Handler>(handler));
             if (window_task_detail::queue(std::move(work))) {
                 return true;
@@ -167,9 +171,6 @@ public:
 private:
     std::shared_ptr<window_task_detail::State> state_;
 };
-
-// Call before normal TranslateMessage/DispatchMessage handling.
-bool dispatch_window_task_message(const MSG& message) noexcept;
 
 }  // namespace app
 

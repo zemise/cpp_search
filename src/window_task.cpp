@@ -13,6 +13,29 @@ UINT completionMessage() noexcept {
     return message;
 }
 
+constexpr const wchar_t* DISPATCHER_CLASS = L"LISWorkbenchWindowTaskDispatcher";
+
+LRESULT CALLBACK dispatcherProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == completionMessage()) {
+        std::unique_ptr<Completion> completion(reinterpret_cast<Completion*>(lParam));
+        if (completion) completion->deliver();
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+ATOM dispatcherClass() noexcept {
+    static const ATOM atom = [] {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = dispatcherProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = DISPATCHER_CLASS;
+        return RegisterClassExW(&wc);
+    }();
+    return atom;
+}
+
 DWORD WINAPI runWork(void* parameter) noexcept {
     std::unique_ptr<Work> work(static_cast<Work*>(parameter));
     work->execute();
@@ -31,11 +54,22 @@ bool queue(std::unique_ptr<Work> work) noexcept {
     return false;
 }
 
-bool post(DWORD uiThreadId, std::unique_ptr<Completion> completion) noexcept {
-    if (!completion || completionMessage() == 0) return false;
+HWND dispatcher() noexcept {
+    thread_local HWND window = nullptr;
+    if (window && IsWindow(window)) return window;
+    if (!dispatcherClass() || completionMessage() == 0) return nullptr;
+
+    window = CreateWindowExW(0, DISPATCHER_CLASS, L"", 0,
+                             0, 0, 0, 0, HWND_MESSAGE, nullptr,
+                             GetModuleHandleW(nullptr), nullptr);
+    return window;
+}
+
+bool post(HWND dispatcherWindow, std::unique_ptr<Completion> completion) noexcept {
+    if (!dispatcherWindow || !completion || completionMessage() == 0) return false;
     Completion* raw = completion.release();
-    if (PostThreadMessageW(uiThreadId, completionMessage(), 0,
-                           reinterpret_cast<LPARAM>(raw))) {
+    if (PostMessageW(dispatcherWindow, completionMessage(), 0,
+                     reinterpret_cast<LPARAM>(raw))) {
         return true;
     }
     delete raw;
@@ -58,18 +92,6 @@ void WindowTask::cancel() noexcept {
 
 bool WindowTask::active() const noexcept {
     return state_->active.load(std::memory_order_acquire);
-}
-
-bool dispatch_window_task_message(const MSG& message) noexcept {
-    if (message.hwnd != nullptr ||
-        message.message != window_task_detail::completionMessage()) {
-        return false;
-    }
-
-    std::unique_ptr<window_task_detail::Completion> completion(
-        reinterpret_cast<window_task_detail::Completion*>(message.lParam));
-    if (completion) completion->deliver();
-    return true;
 }
 
 }  // namespace app

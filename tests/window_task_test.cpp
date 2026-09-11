@@ -20,10 +20,8 @@ bool pumpUntil(const std::function<bool()>& condition, DWORD timeoutMs) {
     while (!condition() && GetTickCount64() < deadline) {
         MSG message{};
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-            if (!app::dispatch_window_task_message(message)) {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
         }
         Sleep(1);
     }
@@ -33,10 +31,6 @@ bool pumpUntil(const std::function<bool()>& condition, DWORD timeoutMs) {
 }  // namespace
 
 int main() {
-    // Ensure this thread owns a Win32 message queue before workers can post back.
-    MSG message{};
-    PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
-
     {
         app::WindowTask task;
         int delivered = 0;
