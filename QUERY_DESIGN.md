@@ -121,7 +121,7 @@ packet size=4096;user id=...;password=...;data source=...;persist security info=
 | `JC_dept_mz_zy` | 临床申请科室字典，根据 `TYPE / TYPENAME` 区分门诊或住院后解析 `DEPT_CODE -> DEPT_NAME` | 门诊：`mzksid`, `mzksmc`；住院：`zyksid`, `zyksmc`；`delete_bit` |
 | `JC_EMPLOYEE_PROPERTY` | 人员字典，用于“检验者”和“审核者”显示 | `EMPLOYEE_ID`, `NAME`, `D_CODE`, `YS_CODE`, `TYPENAME` |
 | `LS_AS_RESULTP` | 原候选检验者来源，但实测覆盖率低，当前不作为主来源 | `REP_NO`, `EditName`, `ChkNAME`, `TXM_NO` |
-| `LS_XK_BloodRequestApply` | 输血申请主表，输血结果查询列表主来源 | `ApplyFormNO`, `Apply_Time`, `Plan_Date`, `ApplyForm_Statue`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `TranProperty` |
+| `LS_XK_BloodRequestApply` | 输血申请主表，输血结果查询列表主来源 | `ApplyFormNO`, `Apply_Time`, `Plan_Date`, `ApplyForm_Statue`, `Remark`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `TranProperty` |
 | `LS_XK_BloodRequestApplySon` | 输血申请子表，用于按申请单聚合申请成分；大量输血申请量对照按成分大类 ID 分类 | `ApplyFormNO`, `CompositionBig_ID`, `ApplyComposition`, `ApplyNum`, `ApplyUnit` |
 | `LS_XK_BloodCrossMatch` | 交叉配血记录表，用于按输血申请号关联病人和配血审核信息 | `ApplyFormNO`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `VerifyState`, `BloodInID`, `Match_Date` |
 | `LS_XK_BloodInfo` | 血袋库存表，通过成分 ID 关联实际血袋规格和类型 | `ID`, `CompositionID`, `BloodBagNO`, `CmpProductCode` |
@@ -152,6 +152,7 @@ packet size=4096;user id=...;password=...;data source=...;persist security info=
 | 输血申请时间 | `Apply_Time` |
 | 输血计划时间 | `Plan_Date` |
 | 申请状态 | `ApplyForm_Statue`，当前已确认值为 `已审核`、`未审核`、`已完结` |
+| 驳回原因 | `Remark` |
 | 病人号 | `Patient_NO` |
 | 病人类型 | `Patient_NOType` |
 | 病人姓名 | `Patient_Name` |
@@ -199,7 +200,7 @@ ISNULL(Apply_Purpose,'') LIKE '%备血%'
 
 ### 输血单统计
 
-`统计分析管理 -> 输血单统计` 仅读取 `LS_XK_BloodRequestApply`，不关联申请成分、交叉配血、出库或血袋表。统计时间按 `Apply_Time >= 开始日期 AND Apply_Time < DATEADD(day,1,结束日期)`，以去空格后的唯一 `ApplyFormNO` 为主键；空申请单号不进入正式总数并单列异常。页面默认纳入未审核、已审核和已完结，分别提供默认不勾选的“包含已驳回”和“包含已删除”，其中 `Delete_Bit=1` 或状态为已删除统一归为已删除。未知状态不进入正式申请单总数，单列为其他状态异常；同一申请单状态冲突时按 `已删除 > 已驳回 > 已完结 > 已审核 > 未审核 > 其他` 归类并显示冲突。院区在 C++ 内存中按 `Apply_Dept` 是否包含“滨水”派生为新院或老院，过滤后再计算总数和状态分布。明细支持状态配色、表头本地排序、Excel `.xlsx` 导出和未删除申请单跳转。
+`统计分析管理 -> 输血单统计` 仅读取 `LS_XK_BloodRequestApply`，不关联申请成分、交叉配血、出库或血袋表。统计时间按 `Apply_Time >= 开始日期 AND Apply_Time < DATEADD(day,1,结束日期)`，以去空格后的唯一 `ApplyFormNO` 为主键；空申请单号不进入正式总数并保留底层异常计数。页面默认纳入未审核、已审核和已完结，分别提供默认不勾选的“包含已驳回”和“包含已删除”，其中 `Delete_Bit=1` 或状态为已删除统一归为已删除。未知状态不进入正式申请单总数；同一申请单状态冲突时按 `已删除 > 已驳回 > 已完结 > 已审核 > 未审核 > 其他` 归类。院区在 C++ 内存中按 `Apply_Dept` 是否包含“滨水”派生为新院或老院，过滤后再计算总数和状态分布。唯一汇总 ListView 依次显示总数、未审核、已审核、已完结、已驳回、已删除、紧急、常规、备血；其上方使用自绘分组标题将列划为“总体、按申请状态分类、按紧急程度分类”。分组标题和数据单元格采用相同色系：总体浅灰、申请状态浅蓝、紧急程度浅橙，“紧急”数值使用红色文字；不显示分类合计提示和异常汇总 ListView。紧急程度按完成申请单去重、院区过滤及状态勾选过滤后的 `TranProperty` 精确统计，其中 `紧急(电话联系输血科)` 归入紧急。下方明细在“院区”之后显示“紧急程度”，与“输血结果查询”左侧列表相同，直接显示 `TranProperty`；其去空格值精确等于 `紧急(电话联系输血科)` 时，仅该单元格覆盖为 `RGB(234,51,35)` 红色背景。明细还在“申请状态”之后显示“原因”，直接读取 `Remark`，用于查看已驳回申请单原因；新增明细列均进入 Excel `.xlsx` 导出。明细支持状态配色、表头本地排序和未删除申请单跳转。
 
 ### 交叉配血记录
 

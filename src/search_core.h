@@ -599,10 +599,18 @@ struct TransfusionOrderStatQuery {
     bool include_deleted = false;
 };
 
+enum class TransfusionOrderUrgencyCategory {
+    Emergency,
+    Routine,
+    Backup,
+    Other,
+};
+
 struct TransfusionOrderStatRawRow {
     std::string apply_form_no;
     std::string apply_time;
     std::string apply_status;
+    std::string remark;
     std::string patient_no;
     std::string patient_no_type;
     std::string patient_name;
@@ -619,6 +627,7 @@ struct TransfusionOrderStatDetailRow {
     std::string apply_form_no;
     std::string apply_time;
     std::string apply_status;
+    std::string remark;
     std::string patient_no;
     std::string patient_no_type;
     std::string patient_name;
@@ -638,6 +647,9 @@ struct TransfusionOrderStatSummary {
     int completed_count = 0;
     int rejected_count = 0;
     int deleted_count = 0;
+    int emergency_count = 0;
+    int routine_count = 0;
+    int backup_count = 0;
     int other_status_count = 0;
     int missing_apply_form_no_count = 0;
     int conflict_count = 0;
@@ -917,6 +929,7 @@ bool build_transfusion_order_statistics(const TransfusionOrderStatQuery& query,
                                         TransfusionOrderStatSummary& summary,
                                         std::vector<TransfusionOrderStatDetailRow>& rows,
                                         std::string& error);
+TransfusionOrderUrgencyCategory classify_transfusion_order_urgency(const std::string& value);
 bool query_transfusion_order_statistics(const TransfusionOrderStatQuery& query,
                                         TransfusionOrderStatSummary& summary,
                                         std::vector<TransfusionOrderStatDetailRow>& rows,

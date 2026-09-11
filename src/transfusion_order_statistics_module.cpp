@@ -28,6 +28,7 @@ namespace {
 
 constexpr const wchar_t* WND_CLASS = L"TransfusionOrderStatisticsModuleChild";
 constexpr const wchar_t* LEGEND_CLASS = L"TransfusionOrderStatisticsLegend";
+constexpr const wchar_t* SUMMARY_GROUP_CLASS = L"TransfusionOrderStatisticsSummaryGroup";
 constexpr const wchar_t* WINDOW_TITLE = L"输血单统计";
 constexpr const wchar_t* PROP_STATE = L"TransfusionOrderStatisticsSt";
 constexpr UINT WM_TRANSFUSION_ORDER_LOADED = WM_APP + 0x578;
@@ -38,6 +39,10 @@ constexpr COLORREF COLOR_COMPLETED = RGB(0xC8, 0xE6, 0xC9);
 constexpr COLORREF COLOR_REJECTED = RGB(0xFF, 0xCD, 0xD2);
 constexpr COLORREF COLOR_DELETED = RGB(0xE0, 0xE0, 0xE0);
 constexpr COLORREF COLOR_OTHER = RGB(0xFF, 0xFF, 0xFF);
+constexpr COLORREF COLOR_EMERGENCY = RGB(0xEA, 0x33, 0x23);
+constexpr COLORREF COLOR_SUMMARY_TOTAL = RGB(0xEE, 0xEE, 0xEE);
+constexpr COLORREF COLOR_SUMMARY_STATUS = RGB(0xE3, 0xF2, 0xFD);
+constexpr COLORREF COLOR_SUMMARY_URGENCY = RGB(0xFF, 0xF3, 0xE0);
 
 enum ControlId {
     IDC_START_DATE = 7301,
@@ -48,7 +53,6 @@ enum ControlId {
     IDC_QUERY,
     IDC_EXPORT,
     IDC_MAIN_SUMMARY,
-    IDC_EXTRA_SUMMARY,
     IDC_DETAILS,
     IDC_STATUS,
 };
@@ -60,9 +64,11 @@ struct ListColumn {
 
 enum DetailColumn {
     COL_CAMPUS,
+    COL_URGENCY,
     COL_APPLY_FORM_NO,
     COL_APPLY_TIME,
     COL_APPLY_STATUS,
+    COL_REMARK,
     COL_PATIENT_NO,
     COL_PATIENT_NO_TYPE,
     COL_PATIENT_NAME,
@@ -75,26 +81,40 @@ enum DetailColumn {
     DETAIL_COLUMN_COUNT,
 };
 
-constexpr ListColumn MAIN_SUMMARY_COLUMNS[] = {
-    {L"输血申请单总数", 250},
-    {L"未审核", 210},
-    {L"已审核", 210},
-    {L"已完结", 210},
+enum SummaryColumn {
+    SUMMARY_TOTAL,
+    SUMMARY_UNREVIEWED,
+    SUMMARY_REVIEWED,
+    SUMMARY_COMPLETED,
+    SUMMARY_REJECTED,
+    SUMMARY_DELETED,
+    SUMMARY_EMERGENCY,
+    SUMMARY_ROUTINE,
+    SUMMARY_BACKUP,
+    SUMMARY_COLUMN_COUNT,
 };
 
-constexpr ListColumn EXTRA_SUMMARY_COLUMNS[] = {
-    {L"已驳回", 190},
-    {L"已删除", 190},
-    {L"其他状态异常", 230},
-    {L"空申请单号异常", 230},
-    {L"状态冲突", 190},
+constexpr ListColumn MAIN_SUMMARY_COLUMNS[] = {
+    {L"输血申请单总数", 190},
+    {L"未审核", 135},
+    {L"已审核", 135},
+    {L"已完结", 135},
+    {L"已驳回", 135},
+    {L"已删除", 135},
+    {L"紧急", 145},
+    {L"常规", 145},
+    {L"备血", 145},
 };
+
+constexpr int MAIN_SUMMARY_COLUMN_PERCENTAGES[] = {14, 10, 10, 10, 10, 10, 12, 12, 12};
 
 constexpr ListColumn DETAIL_COLUMNS[] = {
     {L"院区", 70},
+    {L"紧急程度", 150},
     {L"申请单号", 160},
     {L"申请时间", 150},
     {L"申请状态", 90},
+    {L"原因", 240},
     {L"病人号", 130},
     {L"病人类型", 90},
     {L"姓名", 90},
@@ -107,6 +127,8 @@ constexpr ListColumn DETAIL_COLUMNS[] = {
 };
 
 static_assert(std::size(DETAIL_COLUMNS) == DETAIL_COLUMN_COUNT);
+static_assert(std::size(MAIN_SUMMARY_COLUMNS) == SUMMARY_COLUMN_COUNT);
+static_assert(std::size(MAIN_SUMMARY_COLUMN_PERCENTAGES) == SUMMARY_COLUMN_COUNT);
 
 using Summary = search::TransfusionOrderStatSummary;
 using DetailRow = search::TransfusionOrderStatDetailRow;
@@ -124,8 +146,8 @@ struct State {
     HWND query = nullptr;
     HWND exportExcel = nullptr;
     HWND legend = nullptr;
+    HWND summaryGroups = nullptr;
     HWND mainSummary = nullptr;
-    HWND extraSummary = nullptr;
     HWND details = nullptr;
     HWND status = nullptr;
     search::PageFeedback feedback;
@@ -252,22 +274,22 @@ void populateSummary(State* st) {
         st->summary.unreviewed_count,
         st->summary.reviewed_count,
         st->summary.completed_count,
-    });
-    populateOneRow(st->extraSummary, {
         st->summary.rejected_count,
         st->summary.deleted_count,
-        st->summary.other_status_count,
-        st->summary.missing_apply_form_no_count,
-        st->summary.conflict_count,
+        st->summary.emergency_count,
+        st->summary.routine_count,
+        st->summary.backup_count,
     });
 }
 
 std::string cellValue(const DetailRow& row, int column) {
     switch (column) {
         case COL_CAMPUS: return row.campus;
+        case COL_URGENCY: return row.tran_property;
         case COL_APPLY_FORM_NO: return row.apply_form_no;
         case COL_APPLY_TIME: return row.apply_time;
         case COL_APPLY_STATUS: return row.apply_status;
+        case COL_REMARK: return row.remark;
         case COL_PATIENT_NO: return row.patient_no;
         case COL_PATIENT_NO_TYPE: return row.patient_no_type;
         case COL_PATIENT_NAME: return row.patient_name;
@@ -288,6 +310,15 @@ COLORREF rowStatusColor(const DetailRow& row) {
     if (row.apply_status == "已完结") return COLOR_COMPLETED;
     if (row.apply_status == "已驳回") return COLOR_REJECTED;
     return COLOR_OTHER;
+}
+
+COLORREF detailCellColor(const DetailRow& row, int column) {
+    if (column == COL_URGENCY &&
+        search::classify_transfusion_order_urgency(row.tran_property) ==
+            search::TransfusionOrderUrgencyCategory::Emergency) {
+        return COLOR_EMERGENCY;
+    }
+    return rowStatusColor(row);
 }
 
 void populateDetails(State* st) {
@@ -392,6 +423,73 @@ void registerLegendClass(HINSTANCE instance) {
     registered = true;
 }
 
+void drawSummaryGroup(HDC dc, RECT rect, const wchar_t* text, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    FillRect(dc, &rect, brush);
+    DeleteObject(brush);
+    FrameRect(dc, &rect, reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+    DrawTextW(dc, text, -1, &rect,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+}
+
+LRESULT CALLBACK summaryGroupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) return 1;
+    if (msg != WM_PAINT) return DefWindowProcW(hwnd, msg, wp, lp);
+
+    PAINTSTRUCT ps{};
+    HDC dc = BeginPaint(hwnd, &ps);
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    FillRect(dc, &client, reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1));
+    SetBkMode(dc, TRANSPARENT);
+
+    auto* st = reinterpret_cast<State*>(GetPropW(GetParent(hwnd), PROP_STATE));
+    HGDIOBJ oldFont = st && st->ctx.uiFont ? SelectObject(dc, st->ctx.uiFont) : nullptr;
+    if (st && st->mainSummary) {
+        int edges[SUMMARY_COLUMN_COUNT + 1]{};
+        for (int column = 0; column < SUMMARY_COLUMN_COUNT; ++column) {
+            edges[column + 1] = edges[column] + ListView_GetColumnWidth(st->mainSummary, column);
+        }
+        const int horizontalOffset = GetScrollPos(st->mainSummary, SB_HORZ);
+        for (int& edge : edges) edge -= horizontalOffset;
+        drawSummaryGroup(dc, RECT{edges[SUMMARY_TOTAL], 0, edges[SUMMARY_UNREVIEWED], client.bottom},
+                         L"总体", COLOR_SUMMARY_TOTAL);
+        drawSummaryGroup(dc, RECT{edges[SUMMARY_UNREVIEWED], 0, edges[SUMMARY_EMERGENCY], client.bottom},
+                         L"按申请状态分类", COLOR_SUMMARY_STATUS);
+        drawSummaryGroup(dc, RECT{edges[SUMMARY_EMERGENCY], 0, edges[SUMMARY_COLUMN_COUNT], client.bottom},
+                         L"按紧急程度分类", COLOR_SUMMARY_URGENCY);
+    }
+    if (oldFont) SelectObject(dc, oldFont);
+    EndPaint(hwnd, &ps);
+    return 0;
+}
+
+void registerSummaryGroupClass(HINSTANCE instance) {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = summaryGroupProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.lpszClassName = SUMMARY_GROUP_CLASS;
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+void resizeSummaryColumns(State* st, int availableWidth) {
+    if (!st || !st->mainSummary || availableWidth <= 0) return;
+    int used = 0;
+    for (int column = 0; column < SUMMARY_COLUMN_COUNT; ++column) {
+        const int columnWidth = column == SUMMARY_COLUMN_COUNT - 1
+            ? availableWidth - used
+            : availableWidth * MAIN_SUMMARY_COLUMN_PERCENTAGES[column] / 100;
+        ListView_SetColumnWidth(st->mainSummary, column, columnWidth);
+        used += columnWidth;
+    }
+    if (st->summaryGroups) InvalidateRect(st->summaryGroups, nullptr, TRUE);
+}
+
 void resizeLayout(HWND hwnd, State* st) {
     if (!st) return;
     RECT rc{};
@@ -406,6 +504,7 @@ void resizeLayout(HWND hwnd, State* st) {
     const int row1 = S(hwnd, 9);
     const int row2 = S(hwnd, 42);
     const int topH = S(hwnd, 102);
+    const int groupHeaderH = S(hwnd, 24);
     const int summaryH = S(hwnd, 62);
 
     int x = pad;
@@ -438,9 +537,12 @@ void resizeLayout(HWND hwnd, State* st) {
     if (legendW > 0) MoveWindow(st->legend, x, row2, legendW, controlH, TRUE);
 
     MoveWindow(st->status, pad, S(hwnd, 72), (std::max)(S(hwnd, 200), width - pad * 2), S(hwnd, 22), TRUE);
-    MoveWindow(st->mainSummary, pad, topH, width - pad * 2, summaryH, TRUE);
-    MoveWindow(st->extraSummary, pad, topH + summaryH + pad, width - pad * 2, summaryH, TRUE);
-    const int detailY = topH + summaryH * 2 + pad * 2;
+    const int summaryWidth = width - pad * 2;
+    resizeSummaryColumns(st, (std::max)(S(hwnd, 1), summaryWidth - S(hwnd, 4)));
+    MoveWindow(st->summaryGroups, pad + S(hwnd, 2), topH,
+               (std::max)(S(hwnd, 1), summaryWidth - S(hwnd, 4)), groupHeaderH, TRUE);
+    MoveWindow(st->mainSummary, pad, topH + groupHeaderH, summaryWidth, summaryH, TRUE);
+    const int detailY = topH + groupHeaderH + summaryH + pad;
     MoveWindow(st->details, pad, detailY, width - pad * 2,
                (std::max)(S(hwnd, 100), height - detailY - pad), TRUE);
     search::layout_page_feedback(st->feedback);
@@ -537,6 +639,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetPropW(hwnd, PROP_STATE, st);
             st->bgBrush = CreateSolidBrush(RGB(0xF0, 0xF0, 0xF0));
             registerLegendClass(GetModuleHandleW(nullptr));
+            registerSummaryGroupClass(GetModuleHandleW(nullptr));
 
             st->dateLabel = label(hwnd, L"申请日期：");
             st->startDate = datePicker(hwnd, IDC_START_DATE);
@@ -561,17 +664,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
             st->status = label(hwnd, L"请选择申请日期后查询。", SS_LEFT);
 
+            st->summaryGroups = CreateWindowExW(0, SUMMARY_GROUP_CLASS, L"",
+                WS_CHILD | WS_VISIBLE,
+                0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+
             st->mainSummary = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
                 0, 0, 0, 0, hwnd, win32_control_id(IDC_MAIN_SUMMARY), GetModuleHandleW(nullptr), nullptr);
-            ListView_SetExtendedListViewStyle(st->mainSummary, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+            ListView_SetExtendedListViewStyle(st->mainSummary, LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
             initList(st->mainSummary, MAIN_SUMMARY_COLUMNS, static_cast<int>(std::size(MAIN_SUMMARY_COLUMNS)));
-
-            st->extraSummary = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
-                0, 0, 0, 0, hwnd, win32_control_id(IDC_EXTRA_SUMMARY), GetModuleHandleW(nullptr), nullptr);
-            ListView_SetExtendedListViewStyle(st->extraSummary, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-            initList(st->extraSummary, EXTRA_SUMMARY_COLUMNS, static_cast<int>(std::size(EXTRA_SUMMARY_COLUMNS)));
 
             st->details = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
@@ -607,6 +708,34 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_NOTIFY: {
             auto* header = reinterpret_cast<NMHDR*>(lp);
+            if (st && header->idFrom == IDC_MAIN_SUMMARY && header->code == LVN_ITEMCHANGING) {
+                const auto* change = reinterpret_cast<NMLISTVIEW*>(lp);
+                if ((change->uChanged & LVIF_STATE) &&
+                    (change->uNewState & (LVIS_SELECTED | LVIS_FOCUSED))) {
+                    return TRUE;
+                }
+            }
+            if (st && header->idFrom == IDC_MAIN_SUMMARY && header->code == NM_CUSTOMDRAW) {
+                auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lp);
+                if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+                if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                    return CDRF_NOTIFYSUBITEMDRAW;
+                }
+                if (draw->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
+                    if (draw->iSubItem == SUMMARY_TOTAL) {
+                        draw->clrTextBk = COLOR_SUMMARY_TOTAL;
+                    } else if (draw->iSubItem >= SUMMARY_UNREVIEWED &&
+                               draw->iSubItem < SUMMARY_EMERGENCY) {
+                        draw->clrTextBk = COLOR_SUMMARY_STATUS;
+                    } else if (draw->iSubItem >= SUMMARY_EMERGENCY &&
+                               draw->iSubItem < SUMMARY_COLUMN_COUNT) {
+                        draw->clrTextBk = COLOR_SUMMARY_URGENCY;
+                    }
+                    draw->clrText = draw->iSubItem == SUMMARY_EMERGENCY
+                        ? COLOR_EMERGENCY : RGB(0, 0, 0);
+                    return CDRF_NEWFONT;
+                }
+            }
             if (st && header->idFrom == IDC_DETAILS && header->code == NM_CUSTOMDRAW) {
                 auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lp);
                 if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
@@ -615,6 +744,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if (index < st->rows.size()) {
                         draw->clrText = RGB(0, 0, 0);
                         draw->clrTextBk = rowStatusColor(st->rows[index]);
+                    }
+                    return CDRF_NOTIFYSUBITEMDRAW;
+                }
+                if (draw->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
+                    const size_t index = static_cast<size_t>(draw->nmcd.dwItemSpec);
+                    if (index < st->rows.size()) {
+                        draw->clrText = RGB(0, 0, 0);
+                        draw->clrTextBk = detailCellColor(st->rows[index], draw->iSubItem);
                     }
                     return CDRF_NEWFONT;
                 }
@@ -662,12 +799,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 L" 个输血申请单。院区：" + st->loadedCampus + L"。";
             if (st->loadedIncludeRejected) text += L" 包含已驳回。";
             if (st->loadedIncludeDeleted) text += L" 包含已删除。";
-            if (st->summary.other_status_count > 0) {
-                text += L" 其他状态异常 " + std::to_wstring(st->summary.other_status_count) + L" 个。";
-            }
-            if (st->summary.missing_apply_form_no_count > 0) {
-                text += L" 空申请单号异常 " + std::to_wstring(st->summary.missing_apply_form_no_count) + L" 条。";
-            }
             setStatus(st, text);
             return 0;
         }
@@ -678,6 +809,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 search::apply_font_to_children(hwnd, st->ctx.uiFont);
                 resizeLayout(hwnd, st);
                 if (st->legend) InvalidateRect(st->legend, nullptr, TRUE);
+                if (st->summaryGroups) InvalidateRect(st->summaryGroups, nullptr, TRUE);
                 InvalidateRect(hwnd, nullptr, TRUE);
             }
             return 0;

@@ -105,8 +105,6 @@ constexpr COLORREF COLOR_WARNING_TEXT = RGB(0xB4, 0x56, 0x00);
 constexpr const char* STATUS_PENDING_TEXT = "未审核";
 constexpr const char* STATUS_REVIEWED_TEXT = "已审核";
 constexpr const char* STATUS_COMPLETED_TEXT = "已完结";
-constexpr const char* EMERGENCY_TRAN_PROPERTY = "紧急(电话联系输血科)";
-
 constexpr const wchar_t* STATUS_ALL_LABEL = L"全部";
 constexpr const wchar_t* STATUS_PENDING_LABEL = L"未审核";
 constexpr const wchar_t* STATUS_REVIEWED_LABEL = L"已审核";
@@ -540,7 +538,8 @@ COLORREF statusColor(const std::string& status) {
 }
 
 bool isEmergencyTranProperty(const std::string& value) {
-    return search::trim(value) == EMERGENCY_TRAN_PROPERTY;
+    return search::classify_transfusion_order_urgency(value) ==
+           search::TransfusionOrderUrgencyCategory::Emergency;
 }
 
 COLORREF bloodCellColor(const search::BloodRequestRow& row, int col) {

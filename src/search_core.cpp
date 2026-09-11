@@ -4088,6 +4088,10 @@ bool query_backup_blood_statistics(const BackupBloodStatQuery& query,
 
 namespace {
 
+constexpr const char* kTransfusionOrderEmergency = "紧急(电话联系输血科)";
+constexpr const char* kTransfusionOrderRoutine = "常规";
+constexpr const char* kTransfusionOrderBackup = "备血";
+
 std::string transfusion_order_status(const std::string& status, bool deleted) {
     if (deleted || trim(status) == "已删除") return "已删除";
     const std::string value = trim(status);
@@ -4107,6 +4111,14 @@ int transfusion_order_status_priority(const std::string& status) {
 }
 
 }  // namespace
+
+TransfusionOrderUrgencyCategory classify_transfusion_order_urgency(const std::string& value) {
+    const std::string normalized = trim(value);
+    if (normalized == kTransfusionOrderEmergency) return TransfusionOrderUrgencyCategory::Emergency;
+    if (normalized == kTransfusionOrderRoutine) return TransfusionOrderUrgencyCategory::Routine;
+    if (normalized == kTransfusionOrderBackup) return TransfusionOrderUrgencyCategory::Backup;
+    return TransfusionOrderUrgencyCategory::Other;
+}
 
 bool build_transfusion_order_statistics(
     const TransfusionOrderStatQuery& query,
@@ -4153,6 +4165,7 @@ bool build_transfusion_order_statistics(
             aggregate.row.apply_form_no = apply_form_no;
             aggregate.row.apply_time = raw.apply_time;
             aggregate.row.apply_status = status;
+            aggregate.row.remark = raw.remark;
             aggregate.row.patient_no = raw.patient_no;
             aggregate.row.patient_no_type = raw.patient_no_type;
             aggregate.row.patient_name = raw.patient_name;
@@ -4175,6 +4188,9 @@ bool build_transfusion_order_statistics(
         if (transfusion_order_status_priority(status) >
             transfusion_order_status_priority(row.apply_status)) {
             row.apply_status = status;
+            row.remark = raw.remark;
+        } else if (status == row.apply_status) {
+            fill_if_blank(row.remark, raw.remark);
         }
         row.delete_bit = row.delete_bit || raw.delete_bit || status == "已删除";
         if (raw.apply_time > row.apply_time) row.apply_time = raw.apply_time;
@@ -4223,6 +4239,13 @@ bool build_transfusion_order_statistics(
         else if (status == "已完结") ++summary.completed_count;
         else if (status == "已驳回") ++summary.rejected_count;
         else if (status == "已删除") ++summary.deleted_count;
+
+        switch (classify_transfusion_order_urgency(row.tran_property)) {
+            case TransfusionOrderUrgencyCategory::Emergency: ++summary.emergency_count; break;
+            case TransfusionOrderUrgencyCategory::Routine: ++summary.routine_count; break;
+            case TransfusionOrderUrgencyCategory::Backup: ++summary.backup_count; break;
+            case TransfusionOrderUrgencyCategory::Other: break;
+        }
         rows.push_back(std::move(row));
     }
 
@@ -4261,6 +4284,7 @@ bool query_transfusion_order_statistics(
         << "isnull(LTRIM(RTRIM(a.ApplyFormNO)),''),"
         << "isnull(CONVERT(varchar(19),a.Apply_Time,120),''),"
         << "isnull(LTRIM(RTRIM(a.ApplyForm_Statue)),''),"
+        << "isnull(LTRIM(RTRIM(a.Remark)),''),"
         << "isnull(LTRIM(RTRIM(a.Patient_NO)),''),"
         << "isnull(LTRIM(RTRIM(a.Patient_NOType)),''),"
         << "isnull(LTRIM(RTRIM(a.Patient_Name)),''),"
@@ -4284,15 +4308,16 @@ bool query_transfusion_order_statistics(
         row.apply_form_no = fetch_column(stmt, 1);
         row.apply_time = fetch_column(stmt, 2);
         row.apply_status = fetch_column(stmt, 3);
-        row.patient_no = fetch_column(stmt, 4);
-        row.patient_no_type = fetch_column(stmt, 5);
-        row.patient_name = fetch_column(stmt, 6);
-        row.apply_dept = fetch_column(stmt, 7);
-        row.apply_dept_id = fetch_column(stmt, 8);
-        row.bed_no = fetch_column(stmt, 9);
-        row.apply_doctor = fetch_column(stmt, 10);
-        row.tran_property = fetch_column(stmt, 11);
-        row.delete_bit = trim(fetch_column(stmt, 12)) == "1";
+        row.remark = fetch_column(stmt, 4);
+        row.patient_no = fetch_column(stmt, 5);
+        row.patient_no_type = fetch_column(stmt, 6);
+        row.patient_name = fetch_column(stmt, 7);
+        row.apply_dept = fetch_column(stmt, 8);
+        row.apply_dept_id = fetch_column(stmt, 9);
+        row.bed_no = fetch_column(stmt, 10);
+        row.apply_doctor = fetch_column(stmt, 11);
+        row.tran_property = fetch_column(stmt, 12);
+        row.delete_bit = trim(fetch_column(stmt, 13)) == "1";
         raw_rows.push_back(std::move(row));
     }
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
