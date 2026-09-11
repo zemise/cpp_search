@@ -91,6 +91,7 @@ add_library(search_ui_core STATIC
     src/search_settings_dialog.cpp
     src/search_ui_layout.cpp
     src/page_feedback.cpp
+    src/window_task.cpp
     src/trend_window.cpp
     src/trend_chart_renderer.cpp
     src/quality_control_chart_renderer.cpp
@@ -272,6 +273,17 @@ if(BUILD_TESTING)
     )
     target_include_directories(xlsx_writer_tests PRIVATE src)
     add_test(NAME xlsx_writer_tests COMMAND xlsx_writer_tests)
+
+    if(WIN32)
+        add_executable(window_task_tests
+            tests/window_task_test.cpp
+            src/window_task.cpp
+        )
+        target_include_directories(window_task_tests PRIVATE src)
+        target_compile_definitions(window_task_tests PRIVATE
+            UNICODE _UNICODE NOMINMAX ${LIS_WIN7_COMPAT_DEFINITIONS})
+        add_test(NAME window_task_tests COMMAND window_task_tests)
+    endif()
 endif()
 
 # ── Qt 5.15 frontend (opt-in) ─────────────────────────────────

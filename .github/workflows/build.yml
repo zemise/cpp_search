@@ -84,6 +84,7 @@ jobs:
               tat_statistics_tests `
               massive_transfusion_core_tests `
               xlsx_writer_tests `
+              window_task_tests `
             -j $env:NUMBER_OF_PROCESSORS
           if ($LASTEXITCODE -ne 0) {
             throw "Test build failed"
