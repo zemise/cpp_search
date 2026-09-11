@@ -19,5 +19,6 @@ Thumbs.db
 .codegraph/
 .idea/
 .reasonix/
+reasonix.toml
 resource/gnuplot/
 log/

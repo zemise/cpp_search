@@ -65,17 +65,23 @@ void clear_result_lists(const MainUiHandles& ui) {
 }
 
 void present_report_rows(const MainUiHandles& ui, const std::vector<ReportRow>& rows) {
+    SendMessageW(ui.reports, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(ui.reports);
     for (size_t i = 0; i < rows.size(); ++i) {
         insert_report_row(ui.reports, static_cast<int>(i), rows[i]);
     }
+    SendMessageW(ui.reports, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(ui.reports, nullptr, TRUE);
 }
 
 void present_result_rows(const MainUiHandles& ui, const std::vector<ResultRow>& rows) {
+    SendMessageW(ui.results, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(ui.results);
     for (size_t i = 0; i < rows.size(); ++i) {
         insert_result_row(ui.results, static_cast<int>(i), rows[i]);
     }
+    SendMessageW(ui.results, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(ui.results, nullptr, TRUE);
 }
 
 }  // namespace search

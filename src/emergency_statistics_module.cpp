@@ -3,6 +3,7 @@
 #ifdef _WIN32
 
 #include "main_app.h"
+#include "page_feedback.h"
 #include "regular_report_module.h"
 #include "resource.h"
 #include "search_core.h"
@@ -67,31 +68,31 @@ constexpr ListColumn SUMMARY_COLUMNS[] = {
 };
 
 constexpr ListColumn DETAIL_COLUMNS[] = {
-    {L"院区", 100},
-    {L"样本号", 140},
-    {L"条码号", 240},
-    {L"急诊来源", 192},
-    {L"当前状态", 264},
-    {L"签收-审核用时", 320},
-    {L"签收人", 180},
-    {L"病人号", 260},
-    {L"类型", 110},
-    {L"姓名", 176},
-    {L"性别", 104},
-    {L"年龄", 124},
-    {L"申请科室", 300},
+    {L"院区", 50},
+    {L"样本号", 70},
+    {L"条码号", 120},
+    {L"急诊来源", 96},
+    {L"当前状态", 132},
+    {L"签收-审核用时", 160},
+    {L"签收人", 90},
+    {L"病人号", 130},
+    {L"类型", 55},
+    {L"姓名", 88},
+    {L"性别", 52},
+    {L"年龄", 62},
+    {L"申请科室", 150},
     {L"床号", 70},
-    {L"医嘱内容", 460},
-    {L"标本", 180},
-    {L"报告号", 220},
-    {L"仪器", 240},
-    {L"申请时间", 296},
-    {L"签收时间", 296},
-    {L"上机时间", 280},
-    {L"报告时间", 296},
+    {L"医嘱内容", 230},
+    {L"标本", 90},
+    {L"报告号", 110},
+    {L"仪器", 120},
+    {L"申请时间", 148},
+    {L"签收时间", 148},
+    {L"上机时间", 140},
+    {L"报告时间", 148},
     {L"审核", 60},
     {L"发送", 60},
-    {L"", 100},
+    {L"", 50},
 };
 
 struct EmergencyStatisticsState {
@@ -104,6 +105,7 @@ struct EmergencyStatisticsState {
     HWND summary = nullptr;
     HWND details = nullptr;
     HWND status = nullptr;
+    search::PageFeedback feedback;
     HBRUSH bgBrush = nullptr;
     bool querying = false;
     int sortColumn = 4;
@@ -164,7 +166,7 @@ void setToday(HWND hwnd, bool endOfDay) {
 }
 
 void setStatus(EmergencyStatisticsState* st, const std::wstring& text) {
-    if (st && st->status) SetWindowTextW(st->status, text.c_str());
+    if (st) search::set_page_status(st->feedback, text);
 }
 
 void setCellUtf8(HWND list, int row, int col, const std::string& text) {
@@ -388,13 +390,14 @@ void resizeLayout(HWND hwnd, EmergencyStatisticsState* st) {
     const int h = rc.bottom - rc.top;
     const int pad = S(hwnd, 10);
     const int topH = S(hwnd, 42);
-    const int summaryH = S(hwnd, 62);
+    const int summaryH = S(hwnd, 76);
     const int statusX = S(hwnd, 864);
     const int statusW = (std::max)(S(hwnd, 120), w - statusX - pad);
     MoveWindow(st->status, statusX, S(hwnd, 12), statusW, S(hwnd, 24), TRUE);
     MoveWindow(st->summary, pad, topH + pad, w - pad * 2, summaryH, TRUE);
     MoveWindow(st->details, pad, topH + summaryH + pad * 2, w - pad * 2,
                (std::max)(S(hwnd, 80), h - topH - summaryH - pad * 3), TRUE);
+    search::layout_page_feedback(st->feedback);
 }
 
 void runQuery(HWND hwnd, EmergencyStatisticsState* st) {
@@ -416,6 +419,7 @@ void runQuery(HWND hwnd, EmergencyStatisticsState* st) {
     st->querying = true;
     EnableWindow(st->query, FALSE);
     setStatus(st, L"正在查询急诊条码统计...");
+    search::show_page_activity(st->feedback, L"正在查询急诊条码统计，请稍候…");
 
     std::thread([hwnd, query]() {
         auto* result = new EmergencyQueryResult();
@@ -495,6 +499,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ListView_SetExtendedListViewStyle(st->details, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
             initList(st->details, DETAIL_COLUMNS, std::size(DETAIL_COLUMNS));
 
+            search::initialize_page_feedback(st->feedback, hwnd, st->status,
+                                             st->details, st->ctx.uiFont);
+            search::add_page_tooltip(st->feedback, st->query,
+                                     L"按当前签收时间、院区和完成状态查询急诊样本。");
+            search::add_page_tooltip(st->feedback, st->onlyUnfinished,
+                                     L"勾选后仅显示尚未完成审核或发送的急诊样本。");
+            search::add_page_tooltip(st->feedback, st->details,
+                                     L"单击列标题排序；双击已上机记录可跳转常规报告。");
+
             search::apply_font_to_children(hwnd, st->ctx.uiFont);
             populateSummary(st);
             resizeLayout(hwnd, st);
@@ -511,6 +524,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             resizeLayout(hwnd, st);
             return 0;
         case WM_COMMAND:
+            if (st && search::handle_page_feedback_command(st->feedback, lp, WINDOW_TITLE)) return 0;
             if (LOWORD(wp) == IDC_QUERY) {
                 runQuery(hwnd, st);
                 return 0;
@@ -549,9 +563,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!st) return 0;
             st->querying = false;
             EnableWindow(st->query, TRUE);
+            search::hide_page_activity(st->feedback);
             if (!result->ok) {
-                setStatus(st, L"查询失败：" + search::utf8_to_wide(result->error));
-                MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
+                search::show_page_alert(st->feedback,
+                    L"查询失败：" + search::utf8_to_wide(result->error));
                 return 0;
             }
             st->statSummary = result->summary;
@@ -581,6 +596,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_CTLCOLORSTATIC:
+            if (st) {
+                LRESULT result = 0;
+                if (search::page_feedback_static_color(
+                        st->feedback, reinterpret_cast<HDC>(wp),
+                        reinterpret_cast<HWND>(lp), result)) return result;
+            }
             SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
             return reinterpret_cast<LRESULT>(st ? st->bgBrush : nullptr);
         case WM_ERASEBKGND: {
@@ -592,6 +613,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY:
             if (st) {
                 KillTimer(hwnd, TIMER_REFRESH_DURATIONS);
+                search::destroy_page_feedback(st->feedback);
                 if (st->bgBrush) DeleteObject(st->bgBrush);
                 RemovePropW(hwnd, PROP_STATE);
             }

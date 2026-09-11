@@ -1,5 +1,5 @@
 # Build and run Win32 main application
-# Usage: .\scripts\build_main.ps1 [-Clean] [-Run] [-Config Release|Debug] [-Generator "Visual Studio 17 2022"] [-LabelPrintPackagePath C:\Deps\LabelPrint\v1.2.9] [-CMakeArgs "-DKEY=VALUE"]
+# Usage: .\scripts\build_main.ps1 [-Clean] [-Run] [-Config Release|Debug] [-Generator "Visual Studio 17 2022"] [-LabelPrintPackagePath C:\Deps\LabelPrint\v1.2.10] [-CMakeArgs "-DKEY=VALUE"]
 
 param(
     [switch]$Clean,

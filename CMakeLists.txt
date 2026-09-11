@@ -7,7 +7,9 @@ if(POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
 
-project(lis_workbench LANGUAGES CXX)
+project(lis_workbench LANGUAGES C CXX)
+
+include(CTest)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,6 +37,20 @@ if(WIN32)
         _WIN32_WINNT=0x0601
         NTDDI_VERSION=0x06010000
     )
+endif()
+
+add_library(sqlite3_amalgamation STATIC
+    external/sqlite/sqlite3.c
+)
+target_include_directories(sqlite3_amalgamation SYSTEM PUBLIC external/sqlite)
+target_compile_definitions(sqlite3_amalgamation PRIVATE
+    SQLITE_DEFAULT_FOREIGN_KEYS=1
+    SQLITE_OMIT_LOAD_EXTENSION
+    SQLITE_THREADSAFE=1
+    ${LIS_WIN7_COMPAT_DEFINITIONS}
+)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(sqlite3_amalgamation PRIVATE -Wno-stringop-overread)
 endif()
 
 # ── Core library ──────────────────────────────────────────────
@@ -74,8 +90,11 @@ add_library(search_ui_core STATIC
     src/search_ui_presenter.cpp
     src/search_settings_dialog.cpp
     src/search_ui_layout.cpp
+    src/page_feedback.cpp
     src/trend_window.cpp
     src/trend_chart_renderer.cpp
+    src/quality_control_chart_renderer.cpp
+    src/xlsx_writer.cpp
 )
 target_include_directories(search_ui_core PUBLIC src resource)
 target_compile_definitions(search_ui_core PUBLIC UNICODE _UNICODE NOMINMAX ${LIS_WIN7_COMPAT_DEFINITIONS})
@@ -139,17 +158,29 @@ endif()
 add_executable(main_app WIN32
     src/main_frame.cpp
     src/menu_toolbar.cpp
+    src/backup_blood_statistics_module.cpp
     src/barcode_label_printing.cpp
     src/barcode_module.cpp
     src/blood_module.cpp
     src/emergency_statistics_module.cpp
     src/hiv_statistics_module.cpp
+    src/immune_duplicate_statistics_module.cpp
+    src/massive_transfusion_statistics_module.cpp
+    src/machine_picker_popup.cpp
+    src/mchc_correction_module.cpp
+    src/outpatient_query_module.cpp
+    src/phone_directory_module.cpp
+    src/quality_control_module.cpp
+    src/quality_control_settings_dialog.cpp
+    src/quality_control_store.cpp
     src/query_module.cpp
     src/regular_report_module.cpp
     src/regular_report_utils.cpp
     src/regular_report_picture.cpp
     src/specimen_sign_module.cpp
     src/settings_module.cpp
+    src/tat_statistics_module.cpp
+    src/transfusion_order_statistics_module.cpp
     src/search_splitter.cpp
     src/tinflate.cpp
     src/crash_handler.cpp
@@ -158,7 +189,7 @@ add_executable(main_app WIN32
 set_target_properties(main_app PROPERTIES OUTPUT_NAME lis_workbench)
 target_include_directories(main_app PRIVATE src resource)
 target_compile_definitions(main_app PRIVATE UNICODE _UNICODE NOMINMAX ${LIS_WIN7_COMPAT_DEFINITIONS})
-target_link_libraries(main_app PRIVATE search_ui_core search_core update_core comctl32 comdlg32 gdiplus shell32 ole32 iphlpapi ws2_32 winspool dbghelp)
+target_link_libraries(main_app PRIVATE search_ui_core search_core update_core sqlite3_amalgamation comctl32 comdlg32 gdiplus shell32 ole32 uxtheme iphlpapi ws2_32 winspool dbghelp)
 if(LIS_HAS_LABELPRINT)
     target_compile_definitions(main_app PRIVATE LIS_HAS_LABELPRINT=1)
     if(TARGET labelprint)
@@ -192,6 +223,55 @@ if(MSVC)
 endif()
 if(MINGW)
     target_link_options(updater PRIVATE -municode -static -static-libgcc -static-libstdc++)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(transfusion_order_core_tests
+        tests/transfusion_order_statistics_test.cpp
+        src/search_core.cpp
+        src/search_text.cpp
+    )
+    target_include_directories(transfusion_order_core_tests PRIVATE src)
+    if(WIN32)
+        target_link_libraries(transfusion_order_core_tests PRIVATE odbc32)
+    endif()
+    add_test(NAME transfusion_order_core_tests COMMAND transfusion_order_core_tests)
+
+    add_executable(search_datetime_tests
+        tests/search_datetime_test.cpp
+        src/search_core.cpp
+        src/search_text.cpp
+    )
+    target_include_directories(search_datetime_tests PRIVATE src)
+    if(WIN32)
+        target_link_libraries(search_datetime_tests PRIVATE odbc32)
+    endif()
+    add_test(NAME search_datetime_tests COMMAND search_datetime_tests)
+
+    add_executable(tat_statistics_tests
+        tests/tat_statistics_test.cpp
+        src/search_core.cpp
+        src/search_text.cpp
+    )
+    target_include_directories(tat_statistics_tests PRIVATE src)
+    if(WIN32)
+        target_link_libraries(tat_statistics_tests PRIVATE odbc32)
+    endif()
+    add_test(NAME tat_statistics_tests COMMAND tat_statistics_tests)
+
+    add_executable(massive_transfusion_core_tests
+        tests/massive_transfusion_statistics_test.cpp
+    )
+    target_include_directories(massive_transfusion_core_tests PRIVATE src)
+    target_link_libraries(massive_transfusion_core_tests PRIVATE search_core)
+    add_test(NAME massive_transfusion_core_tests COMMAND massive_transfusion_core_tests)
+
+    add_executable(xlsx_writer_tests
+        tests/xlsx_writer_test.cpp
+        src/xlsx_writer.cpp
+    )
+    target_include_directories(xlsx_writer_tests PRIVATE src)
+    add_test(NAME xlsx_writer_tests COMMAND xlsx_writer_tests)
 endif()
 
 # ── Qt 5.15 frontend (opt-in) ─────────────────────────────────

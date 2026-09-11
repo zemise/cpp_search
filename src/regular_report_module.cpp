@@ -1228,7 +1228,7 @@ void createLeftPanel(HWND parent, RegularReportState* st) {
     SetPropW(st->urgentLabel, L"RegularEmergencyLabel", reinterpret_cast<HANDLE>(1));
     st->urgentEdit = edt(L"", nrex, rowY(4) - 2, nrew, eh);
     lbl(L"条形码", lx, rowY(5), lw); st->barcodeEdit = edt(L"", ix, rowY(5) - 2, fiw, eh, ES_CENTER);
-    lbl(L"住院号:", lx, rowY(6), lw); st->regNoEdit = edt(L"", ix, rowY(6) - 2, fiw, eh);
+    lbl(L"病人号", lx, rowY(6), lw); st->regNoEdit = edt(L"", ix, rowY(6) - 2, fiw, eh);
 
     // 病人信息
     gy += sH + gg;
@@ -1813,14 +1813,20 @@ void presentReportRows(RegularReportState* st,
                        const std::vector<search::ReportRow>* prev = nullptr) {
     if (!st || !st->reportList) return;
     if (prev && sameReportOrder(*prev, st->reportRows)) {
+        SendMessageW(st->reportList, WM_SETREDRAW, FALSE, 0);
         for (size_t i = 0; i < st->reportRows.size(); ++i)
             updateReportRowCells(st->reportList, static_cast<int>(i), st->reportRows[i]);
+        SendMessageW(st->reportList, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(st->reportList, nullptr, TRUE);
         InvalidateRect(st->rightPanel, nullptr, TRUE);
         return;
     }
+    SendMessageW(st->reportList, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(st->reportList);
     for (size_t i = 0; i < st->reportRows.size(); ++i)
         insertReportRow(st->reportList, static_cast<int>(i), st->reportRows[i]);
+    SendMessageW(st->reportList, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(st->reportList, nullptr, TRUE);
     InvalidateRect(st->rightPanel, nullptr, TRUE);
 }
 
@@ -1899,6 +1905,7 @@ void insertResultRow(HWND list, int row, const search::ResultRow& d,
 void presentResultRows(RegularReportState* st) {
     if (!st || !st->resultList) return;
     finishResultEdit(st, false);
+    SendMessageW(st->resultList, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(st->resultList);
     std::string prevGroup;
     for (size_t i = 0; i < st->resultRows.size(); ++i) {
@@ -1908,6 +1915,8 @@ void presentResultRows(RegularReportState* st) {
                         st->resultRows[i], same ? "" : st->resultRows[i].group_name);
         prevGroup = gn;
     }
+    SendMessageW(st->resultList, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(st->resultList, nullptr, TRUE);
 }
 
 // ============================================================================

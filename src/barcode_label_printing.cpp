@@ -13,6 +13,47 @@ namespace search {
 namespace {
 
 constexpr const wchar_t* DEFAULT_BARCODE_PRINTER_NAME = L"Xprinter XP-360B #2";
+constexpr const wchar_t* ZEBRA_FONT_KEY = L"ZebraChineseFont";
+constexpr const wchar_t* ZEBRA_FONT_SIMSUN = L"E:SIMSUN.TTF";
+constexpr const wchar_t* ZEBRA_FONT_CSONG = L"E:CSONG.TTF";
+
+#if defined(LIS_HAS_LABELPRINT)
+constexpr int ZEBRA_BARCODE_TEXT_WIDTH = 290;
+
+labelprint::MedicalLabelLayout zebraMedicalLabelLayout() {
+    labelprint::MedicalLabelLayout layout;
+    const auto& zebra = labelprint::PrinterProfiles::zebra_zd888();
+    layout.settings.darkness = zebra.darkness;
+    layout.settings.printSpeed = zebra.speed;
+    layout.settings.quantity = 1;
+    layout.testItem.pos.x = layout.barcode.pos.x;
+    layout.testItem.maxWidth = ZEBRA_BARCODE_TEXT_WIDTH;
+    layout.testItem.align = labelprint::MedicalLabelTextAlign::Center;
+    return layout;
+}
+
+bool printZebraMedicalLabelWithoutFallback(const labelprint::MedicalLabelData& data,
+                                           const std::wstring& printer_name) {
+    const auto model = labelprint::detectMedicalLabelPrinterModel(printer_name);
+    if (model != labelprint::MedicalLabelPrinterModel::ZebraZd888) {
+        return false;
+    }
+
+    labelprint::PrinterProfile profile = labelprint::PrinterProfiles::zebra_zd888();
+    profile.nativeChineseFont = search::wide_to_utf8(configured_zebra_chinese_font());
+    profile.nativeChineseFontFallback.clear();
+
+    labelprint::LabelDocument doc = labelprint::buildMedicalLabel(data, zebraMedicalLabelLayout());
+    labelprint::ZplBackend backend;
+    labelprint::PrintJob job = backend.render(doc, profile);
+
+    labelprint::PrinterConnection conn;
+    conn.wideName = printer_name;
+    labelprint::WindowsRawTransport transport;
+    transport.send(job, conn);
+    return true;
+}
+#endif
 
 void append_detail_line(std::wstring& message, const wchar_t* label, const std::string& value) {
     message += label;
@@ -26,6 +67,18 @@ const wchar_t* default_barcode_printer_name() {
     return DEFAULT_BARCODE_PRINTER_NAME;
 }
 
+const wchar_t* default_zebra_chinese_font() {
+    return ZEBRA_FONT_SIMSUN;
+}
+
+const wchar_t* zebra_simsun_font() {
+    return ZEBRA_FONT_SIMSUN;
+}
+
+const wchar_t* zebra_csong_font() {
+    return ZEBRA_FONT_CSONG;
+}
+
 std::wstring configured_barcode_printer_name() {
     std::wstring printer = load_module_str(L"RegularReport", L"BarcodePrinterName",
                                            default_barcode_printer_name());
@@ -33,6 +86,18 @@ std::wstring configured_barcode_printer_name() {
         printer = default_barcode_printer_name();
     }
     return printer;
+}
+
+std::wstring normalize_zebra_chinese_font(const std::wstring& font) {
+    if (font == ZEBRA_FONT_CSONG) {
+        return ZEBRA_FONT_CSONG;
+    }
+    return ZEBRA_FONT_SIMSUN;
+}
+
+std::wstring configured_zebra_chinese_font() {
+    return normalize_zebra_chinese_font(load_module_str(L"RegularReport", ZEBRA_FONT_KEY,
+                                                        default_zebra_chinese_font()));
 }
 
 std::wstring barcode_label_details(const BarcodeLabelPayload& payload) {
@@ -68,6 +133,10 @@ void print_barcode_label(const BarcodeLabelPayload& payload, const std::wstring&
     data.department = payload.department;
     data.patientId = payload.patient_id;
     data.timestamp = payload.timestamp;
+
+    if (printZebraMedicalLabelWithoutFallback(data, printer_name)) {
+        return;
+    }
 
     labelprint::MedicalLabelPrintOptions options;
     options.model = labelprint::MedicalLabelPrinterModel::Auto;

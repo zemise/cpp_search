@@ -22,6 +22,7 @@ struct QueryInput {
     std::string group_code;
     std::string item_code;
     int limit = 0;
+    bool skip_order_text = false;
 };
 
 enum class ReportRowTone {

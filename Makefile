@@ -3,11 +3,11 @@
 # Default target: help
 
 BUILD_DIR     := build/windows-x64
-TOOLCHAIN     := cmake/toolchains/mingw-w64-x86_64.cmake
+TOOLCHAIN     := $(CURDIR)/cmake/toolchains/mingw-w64-x86_64.cmake
 VERSION       := $(shell grep -o '"v[^"]*"' src/version.h | head -1 | tr -d '"')
-LABELPRINT    := $(shell test -d "../../020 LabelPrint/LabelPrint" && echo "../../020 LabelPrint/LabelPrint" || echo "")
+LABELPRINT    := $(shell test -d "../../020 LabelPrint/LabelPrint" && cd "../../020 LabelPrint/LabelPrint" && pwd || echo "")
 
-CMAKE_FLAGS   := -DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN) -DCMAKE_BUILD_TYPE=Release -DBUILD_QT_GUI=OFF -DLIS_LABELPRINT_DIR=$(LABELPRINT)
+CMAKE_FLAGS   := -DCMAKE_BUILD_TYPE=Release -DBUILD_QT_GUI=OFF
 
 # Packaging
 PACKAGE_DIR    := out/windows
@@ -52,13 +52,14 @@ clean:
 	rm -rf $(BUILD_DIR) $(PACKAGE_DIR)
 
 # ── compile ────────────────────────────────────────────────────
-$(BUILD_DIR)/CMakeCache.txt:
+.PHONY: configure
+configure:
 	@echo "[cmake] Configuring with MinGW toolchain ..."
 	mkdir -p $(BUILD_DIR)
-	cd $(BUILD_DIR) && cmake ../.. $(CMAKE_FLAGS)
+	cd $(BUILD_DIR) && cmake ../.. $(CMAKE_FLAGS) -DCMAKE_TOOLCHAIN_FILE="$(TOOLCHAIN)" -DLIS_LABELPRINT_DIR="$(LABELPRINT)"
 
 .PHONY: compile
-compile: $(BUILD_DIR)/CMakeCache.txt
+compile: configure
 	@echo "[compile] Building lis_workbench.exe + Updater.exe ..."
 	cmake --build $(BUILD_DIR) -j
 	@echo "  -> $(BUILD_DIR)/lis_workbench.exe"

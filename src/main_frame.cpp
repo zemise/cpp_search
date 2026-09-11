@@ -18,19 +18,28 @@
 
 #include "app_settings.h"
 #include "app_settings_io.h"
+#include "backup_blood_statistics_module.h"
 #include "crash_handler.h"
 #include "emergency_statistics_module.h"
 #include "log.h"
+#include "massive_transfusion_statistics_module.h"
 #include "search_ui_layout.h"
 #include "barcode_module.h"
 #include "blood_module.h"
 #include "hiv_statistics_module.h"
+#include "immune_duplicate_statistics_module.h"
+#include "mchc_correction_module.h"
 #include "menu_toolbar.h"
 #include "module_registry.h"
+#include "outpatient_query_module.h"
+#include "phone_directory_module.h"
+#include "quality_control_module.h"
 #include "query_module.h"
 #include "regular_report_module.h"
 #include "settings_module.h"
 #include "specimen_sign_module.h"
+#include "transfusion_order_statistics_module.h"
+#include "tat_statistics_module.h"
 #include "update_config.h"
 #include "update_source.h"
 #include "version.h"
@@ -39,6 +48,7 @@ namespace {
 
 constexpr int IDM_QUERY        = 1001;
 constexpr int IDM_BLOOD        = 1002;
+constexpr int IDM_QCONTROL     = 1011;
 constexpr int IDM_SETTINGS     = 2001;
 constexpr int IDM_EXIT         = 2002;
 constexpr int IDM_ABOUT        = 2003;
@@ -55,11 +65,14 @@ constexpr int IDM_TOOL2        = 3012;
 constexpr int IDM_TOOL3        = 3013;
 constexpr int IDM_TOOL4        = 3014;
 constexpr int IDM_TOOL5        = 3015;
+constexpr int IDM_TOOL6        = 3016;
 constexpr int IDM_STAT1        = 3021;
 constexpr int IDM_STAT2        = 3022;
 constexpr int IDM_STAT3        = 3023;
 constexpr int IDM_STAT4        = 3024;
 constexpr int IDM_STAT5        = 3025;
+constexpr int IDM_STAT6        = 3026;
+constexpr int IDM_STAT7        = 3027;
 constexpr int ID_STATUS        = 4001;
 constexpr int ID_TIMER         = 5001;
 constexpr int ID_AUTO_UPDATE_TIMER = 5002;
@@ -228,6 +241,9 @@ int toolbarCommandForMdiChild(HWND child) {
     if (lstrcmpW(title, L"常规报告") == 0) return IDM_TOOL2;
     if (lstrcmpW(title, L"输血结果查询") == 0) return IDM_BLOOD;
     if (lstrcmpW(title, L"检验结果查询") == 0) return IDM_QUERY;
+    if (lstrcmpW(title, L"质控分析") == 0) return IDM_QCONTROL;
+    if (lstrcmpW(title, L"门诊查询") == 0) return IDM_TOOL5;
+    if (lstrcmpW(title, L"常用电话") == 0) return IDM_TOOL6;
     return 0;
 }
 
@@ -248,26 +264,24 @@ void closeActiveMdiChild() {
 // ── placeholder factories (to be replaced with real modules) ────
 
 HWND create_tool4_placeholder(const ModuleContext&) { return createMdiChild(L"工具4"); }
-HWND create_tool5_placeholder(const ModuleContext&) { return createMdiChild(L"工具5"); }
-HWND create_stat3_placeholder(const ModuleContext&) { return createMdiChild(L"统计分析3"); }
-HWND create_stat4_placeholder(const ModuleContext&) { return createMdiChild(L"统计分析4"); }
-HWND create_stat5_placeholder(const ModuleContext&) { return createMdiChild(L"统计分析5"); }
 
 // ── module registry ─────────────────────────────────────────────
 
 const ModuleDef g_modules[] = {
     { L"Query",    L"检验管理", L"检验结果查询(&Q)...", IDM_QUERY,    create_query_module    },
     { L"Blood",    L"检验管理", L"输血结果查询(&B)...", IDM_BLOOD,    create_blood_module },
+    { L"QualityControl", L"检验管理", L"质控分析(&C)", IDM_QCONTROL, create_quality_control_module },
     { L"Barcode",  L"工具",     L"已签收条码查询(&1)...", IDM_TOOL1,   create_barcode_module },
-    { L"RegularReport", L"工具", L"常规报告(&2)",       IDM_TOOL2,   create_regular_report_module },
-    { L"SpecimenSign", L"工具",  L"标本签收中心(&3)",   IDM_TOOL3,   create_specimen_sign_module },
-    { L"Tool4",    L"工具",     L"工具4(&4)",           IDM_TOOL4,   create_tool4_placeholder },
-    { L"Tool5",    L"工具",     L"工具5(&5)",           IDM_TOOL5,   create_tool5_placeholder },
+    { L"MchcCorrection", L"工具", L"脂血MCHC校正(&2)", IDM_TOOL4, create_mchc_correction_module },
+    { L"OutpatientQuery", L"工具", L"门诊查询(&3)", IDM_TOOL5, create_outpatient_query_module },
+    { L"PhoneDirectory", L"工具", L"常用电话(&4)",       IDM_TOOL6,   create_phone_directory_module },
     { L"HivStatistics", L"统计分析管理", L"HIV 抗体检测统计(&1)", IDM_STAT1, create_hiv_statistics_module },
     { L"EmergencyStatistics", L"统计分析管理", L"急诊样本统计(&2)", IDM_STAT2, create_emergency_statistics_module },
-    { L"Stat3",    L"统计分析管理", L"统计分析3(&3)",    IDM_STAT3,   create_stat3_placeholder },
-    { L"Stat4",    L"统计分析管理", L"统计分析4(&4)",    IDM_STAT4,   create_stat4_placeholder },
-    { L"Stat5",    L"统计分析管理", L"统计分析5(&5)",    IDM_STAT5,   create_stat5_placeholder },
+    { L"ImmuneDuplicateStatistics", L"统计分析管理", L"免疫重复项目统计(&3)", IDM_STAT3, create_immune_duplicate_statistics_module },
+    { L"BackupBloodStatistics", L"统计分析管理", L"备血统计(&4)", IDM_STAT4, create_backup_blood_statistics_module },
+    { L"MassiveTransfusionStatistics", L"统计分析管理", L"大量输血统计(&5)", IDM_STAT5, create_massive_transfusion_statistics_module },
+    { L"TransfusionOrderStatistics", L"统计分析管理", L"输血单统计(&6)", IDM_STAT6, create_transfusion_order_statistics_module },
+    { L"TatStatistics", L"统计分析管理", L"检验周转时间统计(&7)", IDM_STAT7, create_tat_statistics_module },
     { L"Settings", L"系统",     L"系统设置(&S)...",     IDM_SETTINGS, create_settings_module  },
 };
 constexpr int g_moduleCount = sizeof(g_modules) / sizeof(g_modules[0]);
@@ -285,6 +299,21 @@ void updateStatusBarParts(HWND sb, int clientWidth) {
 ModuleContext makeCtx() {
     return { g_ctx.mdiClient, g_ctx.instance, g_ctx.uiFont,
              g_ctx.dbSettings, g_ctx.fontSize, &g_ctx };
+}
+
+bool dispatchToolbarOnlyModule(int id) {
+    switch (id) {
+        case IDM_TOOL2:
+            create_regular_report_module(makeCtx());
+            updateToolbarState();
+            return true;
+        case IDM_TOOL3:
+            create_specimen_sign_module(makeCtx());
+            updateToolbarState();
+            return true;
+        default:
+            return false;
+    }
 }
 
 void setMainStatusText(const wchar_t* text) {
@@ -652,6 +681,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             mtAddButton(tb, L"常规报告", IDM_TOOL2);
             mtAddButton(tb, L"输血查询", IDM_BLOOD);
             mtAddButton(tb, L"结果查询", IDM_QUERY);
+            mtAddButton(tb, L"质控分析", IDM_QCONTROL);
+            mtAddButton(tb, L"门诊查询", IDM_TOOL5);
+            mtAddButton(tb, L"常用电话", IDM_TOOL6);
             mtAddStretch(tb);
             mtAddCloseButton(tb, L"关闭当前", ID_BTNCLOSE, false);
 
@@ -724,6 +756,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 }
             }
+
+            if (dispatchToolbarOnlyModule(id)) return 0;
 
             // Fixed items
             switch (id) {

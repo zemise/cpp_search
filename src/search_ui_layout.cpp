@@ -8,6 +8,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <iterator>
 
 namespace search {
 
@@ -25,6 +26,28 @@ float dpi_scale_factor(HWND hwnd) {
         ReleaseDC(hwnd, dc);
     }
     return std::max(1, dpi) / 96.0f;
+}
+
+int measure_control_text_width(HWND parent, HWND control, int minimumLogicalWidth,
+                               int horizontalPaddingLogical) {
+    const auto scale = [parent](int value) {
+        return static_cast<int>(value * dpi_scale_factor(parent));
+    };
+    if (!parent || !control) return scale(minimumLogicalWidth);
+
+    wchar_t text[256]{};
+    const int textLength = GetWindowTextW(control, text, static_cast<int>(std::size(text)));
+    HDC dc = GetDC(parent);
+    if (!dc) return scale(minimumLogicalWidth);
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0));
+    if (!font) font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SIZE size{};
+    GetTextExtentPoint32W(dc, text, textLength, &size);
+    SelectObject(dc, oldFont);
+    ReleaseDC(parent, dc);
+    return std::max(scale(minimumLogicalWidth),
+                    static_cast<int>(size.cx) + scale(horizontalPaddingLogical));
 }
 
 int clamp_font_size(int value) {
@@ -86,6 +109,27 @@ void add_list_column(HWND list, int index, const wchar_t* title, int width) {
     col.cx = width;
     col.iSubItem = index;
     ListView_InsertColumn(list, index, &col);
+}
+
+std::wstring copy_menu_label(const std::wstring& text) {
+    constexpr size_t MAX_PREVIEW_CHARS = 48;
+    std::wstring preview = text;
+    for (wchar_t& ch : preview) {
+        if (ch == L'\r' || ch == L'\n' || ch == L'\t') ch = L' ';
+    }
+    if (preview.empty()) preview = L"（空白）";
+    if (preview.size() > MAX_PREVIEW_CHARS) {
+        preview.resize(MAX_PREVIEW_CHARS);
+        preview += L"…";
+    }
+
+    std::wstring escaped;
+    escaped.reserve(preview.size());
+    for (const wchar_t ch : preview) {
+        escaped.push_back(ch);
+        if (ch == L'&') escaped.push_back(L'&');
+    }
+    return L"复制：" + escaped;
 }
 
 void create_main_controls(HWND hwnd, HFONT font, const MainUiIds& ids, MainUiHandles& ui) {

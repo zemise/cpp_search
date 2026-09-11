@@ -5,6 +5,7 @@
 #include "app_settings_io.h"
 #include "barcode_label_printing.h"
 #include "main_app.h"
+#include "quality_control_settings_dialog.h"
 #include "resource.h"
 #include "search_controller.h"
 #include "search_text.h"
@@ -50,6 +51,9 @@ constexpr int IDC_SET_UPDATE_FOLDER = 5126;
 constexpr int IDC_SET_UPDATE_AUTO_CHECK = 5128;
 constexpr int IDC_SET_UPDATE_MANIFEST_LABEL = 5129;
 constexpr int IDC_SET_UPDATE_FOLDER_LABEL = 5130;
+constexpr int IDC_SET_LIS_DIRECT_ANTIGLOBULIN_CODES = 5131;
+constexpr int IDC_SET_LIS_IRREGULAR_ANTIBODY_CODES = 5132;
+constexpr int IDC_SET_ZEBRA_CHINESE_FONT = 5133;
 constexpr int IDC_LABEL_SERVER = 5201;
 constexpr int IDC_LABEL_INITIAL_DATABASE = 5202;
 constexpr int IDC_LABEL_USER = 5203;
@@ -78,6 +82,18 @@ constexpr int IDC_TEXT_DATABASE_DISPLAY = 5225;
 constexpr int IDC_TEXT_REPORT_PRINTER = 5226;
 constexpr int IDC_TEXT_REPORT_QUICK = 5227;
 constexpr int IDC_TEXT_SAVE_STATUS = 5228;
+constexpr int IDC_SET_LIS_BLOOD_TYPE_MACHINES = 5229;
+constexpr int IDC_SET_LIS_CBC_MACHINES = 5230;
+constexpr int IDC_LABEL_LIS_BLOOD_TYPE_MACHINES = 5231;
+constexpr int IDC_LABEL_LIS_CBC_MACHINES = 5232;
+constexpr int IDC_SET_LIS_BLOOD_EXCLUDE_MACHINES = 5233;
+constexpr int IDC_LABEL_LIS_BLOOD_EXCLUDE_MACHINES = 5234;
+constexpr int IDC_TEXT_SECTION_QUALITY_CONTROL = 5235;
+constexpr int IDC_TEXT_QUALITY_CONTROL_HINT = 5236;
+constexpr int IDC_SETTINGS_TABS = 5237;
+constexpr int IDC_LABEL_LIS_DIRECT_ANTIGLOBULIN_CODES = 5238;
+constexpr int IDC_LABEL_LIS_IRREGULAR_ANTIBODY_CODES = 5239;
+constexpr int IDC_LABEL_ZEBRA_CHINESE_FONT = 5240;
 
 constexpr const wchar_t* WND_CLASS  = L"SettingsModuleChild";
 constexpr const wchar_t* PICKER_CLASS = L"SettingsMachinePicker";
@@ -112,6 +128,9 @@ struct SettingsState {
     HBRUSH editBrush = nullptr;
     HWND updateAutoCheckHost = nullptr;
     HWND updateAutoCheck = nullptr;
+    HWND qualityControlPanel = nullptr;
+    HWND tabs = nullptr;
+    int currentTab = 0;
     std::array<std::string, QUICK_MACHINE_COUNT> quickMachineCodes;
     std::array<std::string, QUICK_MACHINE_COUNT> quickMachineRoomCodes;
     std::array<std::wstring, QUICK_MACHINE_COUNT> quickMachineNames;
@@ -204,10 +223,13 @@ void drawRoundRect(HDC dc, const RECT& rc, int radius, COLORREF fill, COLORREF b
 }
 
 struct SettingsLayout {
+    RECT tabs{};
+    RECT content{};
     RECT database{};
     RECT lis{};
     RECT report{};
     RECT update{};
+    RECT qualityControl{};
     int labelW = 0;
     int gap = 0;
     int editH = 0;
@@ -220,33 +242,80 @@ SettingsLayout calculateLayout(HWND hwnd) {
     const float s = search::dpi_scale_factor(hwnd);
     auto S = [s](int v) { return static_cast<int>(v * s); };
 
-    const int clientW = rc.right - rc.left;
     const int margin = S(24);
     const int top = S(86);
-    const int columnGap = S(18);
-    const int minColumn = S(430);
-    const int contentW = std::max(S(720), clientW - margin * 2);
-    const int columnW = std::max(minColumn, (contentW - columnGap) / 2);
+    const int bottom = std::max(top + S(360), static_cast<int>(rc.bottom) - S(76));
     const int left = margin;
-    const int right = left + columnW + columnGap;
+    const int right = std::max(left + S(720), static_cast<int>(rc.right) - margin);
 
     SettingsLayout l{};
     l.labelW = S(96);
     l.gap = S(10);
     l.editH = S(26);
     l.rowGap = S(34);
-    const int topCardH = S(286);
-    const int bottomCardH = S(224);
-    l.database = RECT{left, top, left + columnW, top + topCardH};
-    l.report = RECT{right, top, right + columnW, top + topCardH};
-    l.lis = RECT{left, l.database.bottom + S(16), left + columnW, l.database.bottom + S(16) + bottomCardH};
-    l.update = RECT{right, l.report.bottom + S(16), right + columnW, l.report.bottom + S(16) + bottomCardH};
+    l.tabs = RECT{left, top, right, top + S(34)};
+    l.content = RECT{left, l.tabs.bottom + S(10), right, bottom};
+    l.database = l.content;
+    l.report = l.content;
+    l.lis = l.content;
+    l.update = l.content;
+    l.qualityControl = l.content;
     return l;
 }
+
+void layoutSettingsWindow(HWND hwnd);
+void updateSourceFieldVisibility(HWND hwnd);
 
 void moveChild(HWND hwnd, int id, int x, int y, int w, int h) {
     HWND child = GetDlgItem(hwnd, id);
     if (child) MoveWindow(child, x, y, w, h, TRUE);
+}
+
+void showChild(HWND hwnd, int id, bool show) {
+    if (HWND child = GetDlgItem(hwnd, id)) ShowWindow(child, show ? SW_SHOW : SW_HIDE);
+}
+
+void updateSettingsPageVisibility(HWND hwnd, SettingsState* st) {
+    const int tab = st ? st->currentTab : 0;
+    const bool database = tab == 0;
+    const bool lis = tab == 1;
+    const bool report = tab == 2;
+    const bool qc = tab == 3;
+    const bool update = tab == 4;
+
+    const int databaseIds[] = {IDC_TEXT_SECTION_DATABASE, IDC_TEXT_DATABASE_HINT, IDC_TEXT_DATABASE_DISPLAY,
+                               IDC_LABEL_SERVER, IDC_SET_SERVER, IDC_LABEL_INITIAL_DATABASE, IDC_SET_INITIAL_DATABASE,
+                               IDC_LABEL_USER, IDC_SET_USER, IDC_LABEL_PASSWORD, IDC_SET_PASSWORD,
+                               IDC_LABEL_FONT_SIZE, IDC_SET_FONT_SIZE, IDC_SET_TEST};
+    for (int id : databaseIds) showChild(hwnd, id, database);
+
+    const int lisIds[] = {IDC_TEXT_SECTION_LIS, IDC_TEXT_LIS_HINT, IDC_LABEL_LIS_ABO_CODES, IDC_SET_LIS_ABO_CODES,
+                          IDC_LABEL_LIS_RHD_CODES, IDC_SET_LIS_RHD_CODES, IDC_LABEL_LIS_HGB_CODES, IDC_SET_LIS_HGB_CODES,
+                          IDC_LABEL_LIS_PLT_CODES, IDC_SET_LIS_PLT_CODES, IDC_LABEL_LIS_IRREGULAR_ANTIBODY_CODES,
+                          IDC_SET_LIS_IRREGULAR_ANTIBODY_CODES, IDC_LABEL_LIS_DIRECT_ANTIGLOBULIN_CODES,
+                          IDC_SET_LIS_DIRECT_ANTIGLOBULIN_CODES, IDC_LABEL_LIS_BLOOD_TYPE_MACHINES,
+                          IDC_SET_LIS_BLOOD_TYPE_MACHINES, IDC_LABEL_LIS_CBC_MACHINES, IDC_SET_LIS_CBC_MACHINES,
+                          IDC_LABEL_LIS_BLOOD_EXCLUDE_MACHINES, IDC_SET_LIS_BLOOD_EXCLUDE_MACHINES};
+    for (int id : lisIds) showChild(hwnd, id, lis);
+
+    const int reportIds[] = {IDC_TEXT_SECTION_REPORT, IDC_TEXT_REPORT_HINT, IDC_TEXT_REPORT_PRINTER, IDC_TEXT_REPORT_QUICK,
+                             IDC_LABEL_BARCODE_PRINTER, IDC_SET_BARCODE_PRINTER, IDC_LABEL_ZEBRA_CHINESE_FONT,
+                             IDC_SET_ZEBRA_CHINESE_FONT, IDC_LABEL_QUICK_MACHINE_1, IDC_SET_QUICK_MACHINE_1,
+                             IDC_SET_QUICK_MACHINE_PICK_1, IDC_LABEL_QUICK_MACHINE_2, IDC_SET_QUICK_MACHINE_2,
+                             IDC_SET_QUICK_MACHINE_PICK_2, IDC_LABEL_QUICK_MACHINE_3, IDC_SET_QUICK_MACHINE_3,
+                             IDC_SET_QUICK_MACHINE_PICK_3};
+    for (int id : reportIds) showChild(hwnd, id, report);
+
+    const int qcIds[] = {IDC_TEXT_SECTION_QUALITY_CONTROL, IDC_TEXT_QUALITY_CONTROL_HINT};
+    for (int id : qcIds) showChild(hwnd, id, qc);
+    if (st && st->qualityControlPanel) ShowWindow(st->qualityControlPanel, qc ? SW_SHOW : SW_HIDE);
+
+    const int updateIds[] = {IDC_TEXT_SECTION_UPDATE, IDC_TEXT_UPDATE_HINT, IDC_LABEL_UPDATE_SOURCE, IDC_SET_UPDATE_SOURCE,
+                             IDC_SET_UPDATE_MANIFEST_LABEL, IDC_SET_UPDATE_MANIFEST_URL, IDC_SET_UPDATE_FOLDER_LABEL,
+                             IDC_SET_UPDATE_FOLDER};
+    for (int id : updateIds) showChild(hwnd, id, update);
+    if (st && st->updateAutoCheckHost) ShowWindow(st->updateAutoCheckHost, update ? SW_SHOW : SW_HIDE);
+    showChild(hwnd, IDC_SET_UPDATE_AUTO_CHECK, update);
 }
 
 void layoutSettingsWindow(HWND hwnd) {
@@ -254,7 +323,8 @@ void layoutSettingsWindow(HWND hwnd) {
     auto S = [s](int v) { return static_cast<int>(v * s); };
     RECT rc{};
     GetClientRect(hwnd, &rc);
-    const SettingsLayout l = calculateLayout(hwnd);
+    auto* st = reinterpret_cast<SettingsState*>(GetPropW(hwnd, PROP_STATE));
+    SettingsLayout l = calculateLayout(hwnd);
     const int cardPadX = S(22);
     const int titleY = S(18);
     const int sectionTitleY = S(16);
@@ -283,6 +353,7 @@ void layoutSettingsWindow(HWND hwnd) {
     const int titleW = std::max(S(300), static_cast<int>(rc.right) - S(48));
     moveChild(hwnd, IDC_TEXT_PAGE_TITLE, S(24), titleY, titleW, S(30));
     moveChild(hwnd, IDC_TEXT_PAGE_SUBTITLE, S(24), S(50), titleW, S(22));
+    if (st && st->tabs) MoveWindow(st->tabs, l.tabs.left, l.tabs.top, l.tabs.right - l.tabs.left, l.tabs.bottom - l.tabs.top, TRUE);
 
     placeSection(IDC_TEXT_SECTION_DATABASE, IDC_TEXT_DATABASE_HINT, l.database);
     placeRow(l.database, 0, IDC_LABEL_SERVER, IDC_SET_SERVER);
@@ -308,6 +379,11 @@ void layoutSettingsWindow(HWND hwnd) {
     placeRow(l.lis, 1, IDC_LABEL_LIS_RHD_CODES, IDC_SET_LIS_RHD_CODES);
     placeRow(l.lis, 2, IDC_LABEL_LIS_HGB_CODES, IDC_SET_LIS_HGB_CODES);
     placeRow(l.lis, 3, IDC_LABEL_LIS_PLT_CODES, IDC_SET_LIS_PLT_CODES);
+    placeRow(l.lis, 4, IDC_LABEL_LIS_IRREGULAR_ANTIBODY_CODES, IDC_SET_LIS_IRREGULAR_ANTIBODY_CODES);
+    placeRow(l.lis, 5, IDC_LABEL_LIS_DIRECT_ANTIGLOBULIN_CODES, IDC_SET_LIS_DIRECT_ANTIGLOBULIN_CODES);
+    placeRow(l.lis, 6, IDC_LABEL_LIS_BLOOD_TYPE_MACHINES, IDC_SET_LIS_BLOOD_TYPE_MACHINES);
+    placeRow(l.lis, 7, IDC_LABEL_LIS_CBC_MACHINES, IDC_SET_LIS_CBC_MACHINES);
+    placeRow(l.lis, 8, IDC_LABEL_LIS_BLOOD_EXCLUDE_MACHINES, IDC_SET_LIS_BLOOD_EXCLUDE_MACHINES);
 
     placeSection(IDC_TEXT_SECTION_REPORT, IDC_TEXT_REPORT_HINT, l.report);
     moveChild(hwnd, IDC_TEXT_REPORT_PRINTER,
@@ -320,15 +396,22 @@ void layoutSettingsWindow(HWND hwnd) {
         moveChild(hwnd, IDC_LABEL_BARCODE_PRINTER, labelX, y, labelW, editH);
         moveChild(hwnd, IDC_SET_BARCODE_PRINTER, ctrlX, y, l.report.right - cardPadX - ctrlX, editH);
     }
+    {
+        const int y = l.report.top + S(128);
+        const int labelX = l.report.left + cardPadX;
+        const int ctrlX = labelX + labelW + controlGap;
+        moveChild(hwnd, IDC_LABEL_ZEBRA_CHINESE_FONT, labelX, y, labelW, editH);
+        moveChild(hwnd, IDC_SET_ZEBRA_CHINESE_FONT, ctrlX, y, S(180), S(160));
+    }
     moveChild(hwnd, IDC_TEXT_REPORT_QUICK,
-              l.report.left + cardPadX, l.report.top + S(134),
+              l.report.left + cardPadX, l.report.top + S(168),
               l.report.right - l.report.left - cardPadX * 2, S(22));
     for (int i = 0; i < QUICK_MACHINE_COUNT; ++i) {
         const int labelId = i == 0 ? IDC_LABEL_QUICK_MACHINE_1 :
                             (i == 1 ? IDC_LABEL_QUICK_MACHINE_2 : IDC_LABEL_QUICK_MACHINE_3);
         const int pickId = i == 0 ? IDC_SET_QUICK_MACHINE_PICK_1 :
                            (i == 1 ? IDC_SET_QUICK_MACHINE_PICK_2 : IDC_SET_QUICK_MACHINE_PICK_3);
-        const int y = l.report.top + S(160) + i * rowGap;
+        const int y = l.report.top + S(194) + i * rowGap;
         const int labelX = l.report.left + cardPadX;
         const int ctrlX = labelX + labelW + controlGap;
         const int buttonW = S(38);
@@ -337,12 +420,10 @@ void layoutSettingsWindow(HWND hwnd) {
                   l.report.right - cardPadX - ctrlX - buttonW - S(8), editH);
         moveChild(hwnd, pickId, l.report.right - cardPadX - buttonW, y - S(1), buttonW, editH + S(2));
     }
-
     placeSection(IDC_TEXT_SECTION_UPDATE, IDC_TEXT_UPDATE_HINT, l.update);
     placeRow(l.update, 0, IDC_LABEL_UPDATE_SOURCE, IDC_SET_UPDATE_SOURCE, S(160));
     placeRow(l.update, 1, IDC_SET_UPDATE_MANIFEST_LABEL, IDC_SET_UPDATE_MANIFEST_URL);
     placeRow(l.update, 1, IDC_SET_UPDATE_FOLDER_LABEL, IDC_SET_UPDATE_FOLDER);
-    auto* st = reinterpret_cast<SettingsState*>(GetPropW(hwnd, PROP_STATE));
     if (st && st->updateAutoCheckHost && st->updateAutoCheck) {
         const int checkX = l.update.left + cardPadX + labelW + controlGap;
         const int checkY = l.update.top + formY + 2 * rowGap;
@@ -352,6 +433,16 @@ void layoutSettingsWindow(HWND hwnd) {
         moveChild(hwnd, IDC_SET_UPDATE_AUTO_CHECK,
                   l.update.left + cardPadX + labelW + controlGap,
                   l.update.top + formY + 2 * rowGap, S(170), editH);
+    }
+
+    placeSection(IDC_TEXT_SECTION_QUALITY_CONTROL, IDC_TEXT_QUALITY_CONTROL_HINT, l.qualityControl);
+    if (st && st->qualityControlPanel) {
+        MoveWindow(st->qualityControlPanel,
+                   l.qualityControl.left + cardPadX,
+                   l.qualityControl.top + S(74),
+                   l.qualityControl.right - l.qualityControl.left - cardPadX * 2,
+                   l.qualityControl.bottom - l.qualityControl.top - S(96),
+                   TRUE);
     }
 
     const int buttonY = std::max(S(96), static_cast<int>(rc.bottom) - S(24) - S(32));
@@ -365,16 +456,20 @@ void layoutSettingsWindow(HWND hwnd) {
               buttonY + S(6), statusW, S(22));
     moveChild(hwnd, IDC_SET_CANCEL, rightEdge - buttonW * 2 - buttonGap, buttonY, buttonW, buttonH);
     moveChild(hwnd, IDC_SET_SAVE, rightEdge - buttonW, buttonY, buttonW, buttonH);
+    updateSettingsPageVisibility(hwnd, st);
+    updateSourceFieldVisibility(hwnd);
 }
 
 bool isMutedTextId(int id) {
     return id == IDC_TEXT_PAGE_SUBTITLE || id == IDC_TEXT_DATABASE_HINT ||
-           id == IDC_TEXT_LIS_HINT || id == IDC_TEXT_REPORT_HINT || id == IDC_TEXT_UPDATE_HINT;
+           id == IDC_TEXT_LIS_HINT || id == IDC_TEXT_REPORT_HINT || id == IDC_TEXT_UPDATE_HINT ||
+           id == IDC_TEXT_QUALITY_CONTROL_HINT;
 }
 
 bool isSectionTitleId(int id) {
     return id == IDC_TEXT_SECTION_DATABASE || id == IDC_TEXT_SECTION_LIS ||
            id == IDC_TEXT_SECTION_REPORT || id == IDC_TEXT_SECTION_UPDATE ||
+           id == IDC_TEXT_SECTION_QUALITY_CONTROL ||
            id == IDC_TEXT_DATABASE_DISPLAY || id == IDC_TEXT_REPORT_PRINTER ||
            id == IDC_TEXT_REPORT_QUICK;
 }
@@ -514,11 +609,13 @@ std::wstring selectedUpdateSourceType(HWND hwnd) {
 }
 
 void updateSourceFieldVisibility(HWND hwnd) {
+    auto* st = reinterpret_cast<SettingsState*>(GetPropW(hwnd, PROP_STATE));
+    const bool update_page = st ? st->currentTab == 4 : true;
     const bool is_http = selectedUpdateSourceType(hwnd) == lis_update::kSourceHttp;
-    ShowWindow(GetDlgItem(hwnd, IDC_SET_UPDATE_MANIFEST_LABEL), is_http ? SW_SHOW : SW_HIDE);
-    ShowWindow(GetDlgItem(hwnd, IDC_SET_UPDATE_MANIFEST_URL), is_http ? SW_SHOW : SW_HIDE);
-    ShowWindow(GetDlgItem(hwnd, IDC_SET_UPDATE_FOLDER_LABEL), is_http ? SW_HIDE : SW_SHOW);
-    ShowWindow(GetDlgItem(hwnd, IDC_SET_UPDATE_FOLDER), is_http ? SW_HIDE : SW_SHOW);
+    ShowWindow(GetDlgItem(hwnd, IDC_SET_UPDATE_MANIFEST_LABEL), update_page && is_http ? SW_SHOW : SW_HIDE);
+    ShowWindow(GetDlgItem(hwnd, IDC_SET_UPDATE_MANIFEST_URL), update_page && is_http ? SW_SHOW : SW_HIDE);
+    ShowWindow(GetDlgItem(hwnd, IDC_SET_UPDATE_FOLDER_LABEL), update_page && !is_http ? SW_SHOW : SW_HIDE);
+    ShowWindow(GetDlgItem(hwnd, IDC_SET_UPDATE_FOLDER), update_page && !is_http ? SW_SHOW : SW_HIDE);
 }
 
 SettingsUpdateConfig collectUpdateConfig(HWND hwnd) {
@@ -580,6 +677,19 @@ void populatePrinterCombo(HWND hwnd) {
     if (selected >= 0) {
         SendMessageW(combo, CB_SETCURSEL, selected, 0);
     }
+}
+
+void populateZebraChineseFontCombo(HWND hwnd) {
+    HWND combo = GetDlgItem(hwnd, IDC_SET_ZEBRA_CHINESE_FONT);
+    if (!combo) return;
+
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(combo, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(search::zebra_simsun_font()));
+    SendMessageW(combo, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(search::zebra_csong_font()));
+    const std::wstring configured = search::configured_zebra_chinese_font();
+    selectComboText(combo, configured.c_str(), 0);
 }
 
 search::DbSettings collectForm(HWND hwnd) {
@@ -821,17 +931,30 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             createText(hwnd, IDC_TEXT_PAGE_TITLE, L"系统设置");
             createText(hwnd, IDC_TEXT_PAGE_SUBTITLE, L"配置数据库连接、显示字号、报告打印、快捷仪器和自动更新。");
+            st->tabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                       0, 0, S(300), S(30), hwnd,
+                                       win32_control_id(IDC_SETTINGS_TABS), GetModuleHandleW(nullptr), nullptr);
+            const wchar_t* tabNames[] = {L"数据库与界面", L"LIS 摘要项目", L"常规报告打印", L"质控品设置", L"自动更新"};
+            for (int i = 0; i < static_cast<int>(sizeof(tabNames) / sizeof(tabNames[0])); ++i) {
+                TCITEMW item{};
+                item.mask = TCIF_TEXT;
+                item.pszText = const_cast<wchar_t*>(tabNames[i]);
+                TabCtrl_InsertItem(st->tabs, i, &item);
+            }
             createText(hwnd, IDC_TEXT_SECTION_DATABASE, L"数据库与界面");
             createText(hwnd, IDC_TEXT_DATABASE_HINT, L"连接 LIS 数据库，并设置主程序字号。");
             createText(hwnd, IDC_TEXT_DATABASE_DISPLAY, L"界面显示");
             createText(hwnd, IDC_TEXT_SECTION_LIS, L"LIS 摘要项目");
-            createText(hwnd, IDC_TEXT_LIS_HINT, L"多个项目代码用分号分隔，用于输血检验摘要显示。");
+            createText(hwnd, IDC_TEXT_LIS_HINT, L"项目代码用分号分隔；仪器格式：ROOM:MACH1,MACH2；排除整科室用 ROOM:。");
             createText(hwnd, IDC_TEXT_SECTION_REPORT, L"常规报告打印");
             createText(hwnd, IDC_TEXT_REPORT_HINT, L"选择条码打印机，并设置底部 1 / 2 / 3 快捷检验仪器。");
             createText(hwnd, IDC_TEXT_REPORT_PRINTER, L"条码打印机");
             createText(hwnd, IDC_TEXT_REPORT_QUICK, L"快捷检验仪器");
             createText(hwnd, IDC_TEXT_SECTION_UPDATE, L"自动更新");
             createText(hwnd, IDC_TEXT_UPDATE_HINT, L"设置共享目录或 HTTP manifest，并控制启动后自动检查。");
+            createText(hwnd, IDC_TEXT_SECTION_QUALITY_CONTROL, L"质控品设置");
+            createText(hwnd, IDC_TEXT_QUALITY_CONTROL_HINT, L"维护某台检验仪器的固定质控样本号、项目、水平、靶值和 SD。");
             createText(hwnd, IDC_TEXT_SAVE_STATUS, L"");
             ShowWindow(GetDlgItem(hwnd, IDC_TEXT_SAVE_STATUS), SW_HIDE);
 
@@ -854,9 +977,21 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             search::create_edit(hwnd, IDC_SET_LIS_HGB_CODES, 0, 0, S(10), S(24));
             createSettingLabel(hwnd, IDC_LABEL_LIS_PLT_CODES, L"PLT 代码");
             search::create_edit(hwnd, IDC_SET_LIS_PLT_CODES, 0, 0, S(10), S(24));
+            createSettingLabel(hwnd, IDC_LABEL_LIS_IRREGULAR_ANTIBODY_CODES, L"不规则代码");
+            search::create_edit(hwnd, IDC_SET_LIS_IRREGULAR_ANTIBODY_CODES, 0, 0, S(10), S(24));
+            createSettingLabel(hwnd, IDC_LABEL_LIS_DIRECT_ANTIGLOBULIN_CODES, L"直抗代码");
+            search::create_edit(hwnd, IDC_SET_LIS_DIRECT_ANTIGLOBULIN_CODES, 0, 0, S(10), S(24));
+            createSettingLabel(hwnd, IDC_LABEL_LIS_BLOOD_TYPE_MACHINES, L"血型仪器");
+            search::create_edit(hwnd, IDC_SET_LIS_BLOOD_TYPE_MACHINES, 0, 0, S(10), S(24));
+            createSettingLabel(hwnd, IDC_LABEL_LIS_CBC_MACHINES, L"血常规仪器");
+            search::create_edit(hwnd, IDC_SET_LIS_CBC_MACHINES, 0, 0, S(10), S(24));
+            createSettingLabel(hwnd, IDC_LABEL_LIS_BLOOD_EXCLUDE_MACHINES, L"输血排除仪器");
+            search::create_edit(hwnd, IDC_SET_LIS_BLOOD_EXCLUDE_MACHINES, 0, 0, S(10), S(24));
 
             createSettingLabel(hwnd, IDC_LABEL_BARCODE_PRINTER, L"条码打印机");
             search::create_combo(hwnd, IDC_SET_BARCODE_PRINTER, 0, 0, S(10), S(220), false);
+            createSettingLabel(hwnd, IDC_LABEL_ZEBRA_CHINESE_FONT, L"Zebra 字体");
+            search::create_combo(hwnd, IDC_SET_ZEBRA_CHINESE_FONT, 0, 0, S(10), S(160), false);
             createSettingLabel(hwnd, IDC_LABEL_QUICK_MACHINE_1, L"快捷仪器 1");
             search::create_edit(hwnd, IDC_SET_QUICK_MACHINE_1, 0, 0, S(10), S(24));
             search::create_button(hwnd, IDC_SET_QUICK_MACHINE_PICK_1, L"...", 0, 0, S(40), S(28));
@@ -885,6 +1020,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             search::create_button(hwnd, IDC_SET_TEST, L"测试连接", 0, 0, S(92), S(30));
             search::create_button(hwnd, IDC_SET_SAVE, L"保存", 0, 0, S(84), S(30));
             search::create_button(hwnd, IDC_SET_CANCEL, L"取消", 0, 0, S(84), S(30));
+            st->qualityControlPanel = create_quality_control_settings_panel(hwnd, st->ctx.uiFont, st->app.db);
 
             auto& app = st->app;
             SetWindowTextW(GetDlgItem(hwnd, IDC_SET_SERVER), app.db.server.c_str());
@@ -896,6 +1032,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetWindowTextW(GetDlgItem(hwnd, IDC_SET_LIS_RHD_CODES), app.lis.rhd_codes.c_str());
             SetWindowTextW(GetDlgItem(hwnd, IDC_SET_LIS_HGB_CODES), app.lis.hgb_codes.c_str());
             SetWindowTextW(GetDlgItem(hwnd, IDC_SET_LIS_PLT_CODES), app.lis.plt_codes.c_str());
+            SetWindowTextW(GetDlgItem(hwnd, IDC_SET_LIS_IRREGULAR_ANTIBODY_CODES), app.lis.irregular_antibody_codes.c_str());
+            SetWindowTextW(GetDlgItem(hwnd, IDC_SET_LIS_DIRECT_ANTIGLOBULIN_CODES), app.lis.direct_antiglobulin_codes.c_str());
+            SetWindowTextW(GetDlgItem(hwnd, IDC_SET_LIS_BLOOD_TYPE_MACHINES), app.lis.blood_type_machines.c_str());
+            SetWindowTextW(GetDlgItem(hwnd, IDC_SET_LIS_CBC_MACHINES), app.lis.cbc_machines.c_str());
+            SetWindowTextW(GetDlgItem(hwnd, IDC_SET_LIS_BLOOD_EXCLUDE_MACHINES), app.lis.blood_lis_exclude_machines.c_str());
             for (int i = 0; i < QUICK_MACHINE_COUNT; ++i) {
                 st->quickMachineCodes[static_cast<size_t>(i)] =
                     search::wide_to_utf8(search::load_module_str(L"RegularReport", quick_machine_code_key(i), L""));
@@ -908,6 +1049,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SendMessageW(GetDlgItem(hwnd, quickMachineEditId(i)), EM_SETREADONLY, TRUE, 0);
             }
             populatePrinterCombo(hwnd);
+            populateZebraChineseFontCombo(hwnd);
             populateUpdateSourceCombo(hwnd);
             SetWindowTextW(GetDlgItem(hwnd, IDC_SET_UPDATE_MANIFEST_URL),
                            search::load_module_str(lis_update::kConfigSection, L"ManifestUrl",
@@ -935,6 +1077,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                          reinterpret_cast<WPARAM>(st->sectionFont), TRUE);
             SendMessageW(GetDlgItem(hwnd, IDC_TEXT_SECTION_UPDATE), WM_SETFONT,
                          reinterpret_cast<WPARAM>(st->sectionFont), TRUE);
+            SendMessageW(GetDlgItem(hwnd, IDC_TEXT_SECTION_QUALITY_CONTROL), WM_SETFONT,
+                         reinterpret_cast<WPARAM>(st->sectionFont), TRUE);
             SendMessageW(GetDlgItem(hwnd, IDC_TEXT_DATABASE_DISPLAY), WM_SETFONT,
                          reinterpret_cast<WPARAM>(st->sectionFont), TRUE);
             SendMessageW(GetDlgItem(hwnd, IDC_TEXT_REPORT_PRINTER), WM_SETFONT,
@@ -960,12 +1104,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RECT rc{};
             GetClientRect(hwnd, &rc);
             FillRect(dc, &rc, st && st->pageBrush ? st->pageBrush : GetSysColorBrush(COLOR_BTNFACE));
-            const SettingsLayout l = calculateLayout(hwnd);
+            SettingsLayout l = calculateLayout(hwnd);
             const int radius = static_cast<int>(10 * search::dpi_scale_factor(hwnd));
-            drawRoundRect(dc, l.database, radius, COLOR_CARD_BG, COLOR_CARD_BORDER);
-            drawRoundRect(dc, l.lis, radius, COLOR_CARD_BG, COLOR_CARD_BORDER);
-            drawRoundRect(dc, l.report, radius, COLOR_CARD_BG, COLOR_CARD_BORDER);
-            drawRoundRect(dc, l.update, radius, COLOR_CARD_BG, COLOR_CARD_BORDER);
+            drawRoundRect(dc, l.content, radius, COLOR_CARD_BG, COLOR_CARD_BORDER);
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -995,6 +1136,19 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetTextColor(dc, COLOR_TEXT);
             return reinterpret_cast<LRESULT>(st && st->editBrush ? st->editBrush : GetStockObject(WHITE_BRUSH));
         }
+        case WM_NOTIFY: {
+            auto* nm = reinterpret_cast<NMHDR*>(lp);
+            if (st && nm->idFrom == IDC_SETTINGS_TABS && nm->code == TCN_SELCHANGE) {
+                st->currentTab = TabCtrl_GetCurSel(st->tabs);
+                if (st->qualityControlPanel) {
+                    update_quality_control_settings_panel_db(st->qualityControlPanel, collectForm(hwnd));
+                }
+                layoutSettingsWindow(hwnd);
+                InvalidateRect(hwnd, nullptr, TRUE);
+                return 0;
+            }
+            break;
+        }
         case WM_COMMAND: {
             int id = LOWORD(wp);
             if (id == IDC_SET_UPDATE_SOURCE && HIWORD(wp) == CBN_SELCHANGE) {
@@ -1011,6 +1165,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (id == IDC_SET_TEST) {
                 auto db = collectForm(hwnd);
+                if (st && st->qualityControlPanel) {
+                    update_quality_control_settings_panel_db(st->qualityControlPanel, db);
+                }
                 if (search::build_connection_string_w(db).empty()) {
                     MessageBoxW(hwnd, L"请先填写服务器、初始数据库和用户名。", L"测试连接", MB_ICONWARNING);
                 } else {
@@ -1029,11 +1186,19 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     oldFontSize = gctx->fontSize;
                 }
                 st->app.db = collectForm(hwnd);
+                if (st->qualityControlPanel) {
+                    update_quality_control_settings_panel_db(st->qualityControlPanel, st->app.db);
+                }
                 st->app.ui.font_size = selectedFontSize(hwnd);
                 st->app.lis.abo_codes = readEdit(hwnd, IDC_SET_LIS_ABO_CODES);
                 st->app.lis.rhd_codes = readEdit(hwnd, IDC_SET_LIS_RHD_CODES);
                 st->app.lis.hgb_codes = readEdit(hwnd, IDC_SET_LIS_HGB_CODES);
                 st->app.lis.plt_codes = readEdit(hwnd, IDC_SET_LIS_PLT_CODES);
+                st->app.lis.irregular_antibody_codes = readEdit(hwnd, IDC_SET_LIS_IRREGULAR_ANTIBODY_CODES);
+                st->app.lis.direct_antiglobulin_codes = readEdit(hwnd, IDC_SET_LIS_DIRECT_ANTIGLOBULIN_CODES);
+                st->app.lis.blood_type_machines = readEdit(hwnd, IDC_SET_LIS_BLOOD_TYPE_MACHINES);
+                st->app.lis.cbc_machines = readEdit(hwnd, IDC_SET_LIS_CBC_MACHINES);
+                st->app.lis.blood_lis_exclude_machines = readEdit(hwnd, IDC_SET_LIS_BLOOD_EXCLUDE_MACHINES);
                 if (!search::save_settings(search::default_ini_path(), st->app)) {
                     setSaveStatus(hwnd, L"");
                     MessageBoxW(hwnd, L"系统设置保存失败，请检查配置文件是否可写。", L"保存失败", MB_ICONERROR);
@@ -1041,6 +1206,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 search::save_module_str(L"RegularReport", L"BarcodePrinterName",
                                         readCombo(hwnd, IDC_SET_BARCODE_PRINTER));
+                search::save_module_str(L"RegularReport", L"ZebraChineseFont",
+                                        search::normalize_zebra_chinese_font(
+                                            readCombo(hwnd, IDC_SET_ZEBRA_CHINESE_FONT)));
                 for (int i = 0; i < QUICK_MACHINE_COUNT; ++i) {
                     search::save_module_str(L"RegularReport", quick_machine_code_key(i),
                                             search::utf8_to_wide(st->quickMachineCodes[static_cast<size_t>(i)]));

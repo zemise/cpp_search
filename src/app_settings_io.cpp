@@ -251,10 +251,20 @@ AppSettings load_settings(const std::wstring& ini_path) {
         }
         return std::wstring(buf);
     };
+    auto read_lis_optional_str = [&](const wchar_t* key, const std::wstring& fallback) {
+        wchar_t buf[1024] = {};
+        GetPrivateProfileStringW(L"LisSummary", key, fallback.c_str(), buf, 1024, ini_path.c_str());
+        return std::wstring(buf);
+    };
     s.lis.abo_codes = read_lis_str(L"AboCodes", s.lis.abo_codes);
     s.lis.rhd_codes = read_lis_str(L"RhdCodes", s.lis.rhd_codes);
     s.lis.hgb_codes = read_lis_str(L"HgbCodes", s.lis.hgb_codes);
     s.lis.plt_codes = read_lis_str(L"PltCodes", s.lis.plt_codes);
+    s.lis.irregular_antibody_codes = read_lis_str(L"IrregularAntibodyCodes", s.lis.irregular_antibody_codes);
+    s.lis.direct_antiglobulin_codes = read_lis_str(L"DirectAntiglobulinCodes", s.lis.direct_antiglobulin_codes);
+    s.lis.blood_type_machines = read_lis_optional_str(L"BloodTypeMachines", s.lis.blood_type_machines);
+    s.lis.cbc_machines = read_lis_optional_str(L"CbcMachines", s.lis.cbc_machines);
+    s.lis.blood_lis_exclude_machines = read_lis_optional_str(L"BloodLisExcludeMachines", s.lis.blood_lis_exclude_machines);
     return s;
 }
 
@@ -276,6 +286,11 @@ bool save_settings(const std::wstring& ini_path, const AppSettings& s) {
     ok &= WritePrivateProfileStringW(L"LisSummary", L"RhdCodes", s.lis.rhd_codes.c_str(), ini_path.c_str()) != FALSE;
     ok &= WritePrivateProfileStringW(L"LisSummary", L"HgbCodes", s.lis.hgb_codes.c_str(), ini_path.c_str()) != FALSE;
     ok &= WritePrivateProfileStringW(L"LisSummary", L"PltCodes", s.lis.plt_codes.c_str(), ini_path.c_str()) != FALSE;
+    ok &= WritePrivateProfileStringW(L"LisSummary", L"IrregularAntibodyCodes", s.lis.irregular_antibody_codes.c_str(), ini_path.c_str()) != FALSE;
+    ok &= WritePrivateProfileStringW(L"LisSummary", L"DirectAntiglobulinCodes", s.lis.direct_antiglobulin_codes.c_str(), ini_path.c_str()) != FALSE;
+    ok &= WritePrivateProfileStringW(L"LisSummary", L"BloodTypeMachines", s.lis.blood_type_machines.c_str(), ini_path.c_str()) != FALSE;
+    ok &= WritePrivateProfileStringW(L"LisSummary", L"CbcMachines", s.lis.cbc_machines.c_str(), ini_path.c_str()) != FALSE;
+    ok &= WritePrivateProfileStringW(L"LisSummary", L"BloodLisExcludeMachines", s.lis.blood_lis_exclude_machines.c_str(), ini_path.c_str()) != FALSE;
     return ok;
 }
 

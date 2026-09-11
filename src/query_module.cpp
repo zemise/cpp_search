@@ -242,6 +242,7 @@ void reloadMachineOptions(QueryState* q) {
 
 void runQuery(QueryState* q) {
     auto input = search::build_query_input(q->ui, q->viewState);
+    input.skip_order_text = true;
     if (search::build_connection_string_w(db(q)).empty()) {
         MessageBoxW(nullptr, L"请先在“设置”中填写数据库连接信息。", L"缺少数据库设置", MB_ICONWARNING);
         return;

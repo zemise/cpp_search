@@ -13,8 +13,8 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  LABELPRINT_VERSION: v1.2.9
-  LABELPRINT_WIN7_ASSET: labelprint-v1.2.9-windows-x64-vs2022-win7.zip
+  LABELPRINT_VERSION: v1.2.10
+  LABELPRINT_WIN7_ASSET: labelprint-v1.2.10-windows-x64-vs2022-win7.zip
 
 jobs:
   windows-installer:
@@ -72,6 +72,31 @@ jobs:
             -Config Release `
             -Generator "Visual Studio 17 2022" `
             -LabelPrintPackagePath "${{ steps.labelprint.outputs.package_root }}"
+
+      - name: Build and run tests
+        shell: pwsh
+        run: |
+          cmake --build build\main-app `
+            --config Release `
+            --target `
+              transfusion_order_core_tests `
+              search_datetime_tests `
+              tat_statistics_tests `
+              massive_transfusion_core_tests `
+              xlsx_writer_tests `
+            -j $env:NUMBER_OF_PROCESSORS
+          if ($LASTEXITCODE -ne 0) {
+            throw "Test build failed"
+          }
+
+          ctest `
+            --test-dir build\main-app `
+            -C Release `
+            --output-on-failure `
+            --timeout 120
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tests failed"
+          }
 
       - name: Package installer
         shell: pwsh

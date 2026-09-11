@@ -20,6 +20,7 @@ QueryFilters make_query_filters(const DbSettings& settings, const QueryInput& in
     filters.group_code = input.group_code;
     filters.item_code = input.item_code;
     filters.limit = input.limit;
+    filters.skip_order_text = input.skip_order_text;
     return filters;
 }
 

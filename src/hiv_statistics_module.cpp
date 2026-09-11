@@ -3,11 +3,14 @@
 #ifdef _WIN32
 
 #include "main_app.h"
+#include "page_feedback.h"
+#include "regular_report_module.h"
 #include "resource.h"
 #include "search_core.h"
 #include "search_text.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "xlsx_writer.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -36,9 +39,11 @@ constexpr const wchar_t* HIV_TEMPLATE_FILE = L"HIVStatisticsTemplate.docx";
 constexpr int HIV_TEMPLATE_PLACEHOLDER_COUNT = 46;
 constexpr UINT WM_HIV_STATS_LOADED = WM_APP + 0x551;
 const COLORREF COLOR_POSITIVE_ROW = RGB(0xFA, 0xC0, 0xCB);
+const COLORREF COLOR_TOTAL_ROW = RGB(0xE8, 0xF2, 0xFF);
 
 enum DetailColumn {
     DetailMachine = 0,
+    DetailSampleSource,
     DetailMethodology,
     DetailLabDepartment,
     DetailItemCode,
@@ -73,8 +78,15 @@ constexpr ListColumn SUMMARY_COLUMNS[] = {
     {L"报告疫情阳性数", 245},
 };
 
+constexpr ListColumn METHODOLOGY_SUMMARY_COLUMNS[] = {
+    {L"方法学", 240},
+    {L"初筛检测数", 190},
+    {L"初筛阳性数", 190},
+};
+
 constexpr ListColumn DETAIL_COLUMNS[] = {
     {L"仪器", 240},
+    {L"样本来源", 180},
     {L"方法学", 120},
     {L"检验科", 92},
     {L"项目代码", 112},
@@ -122,6 +134,30 @@ constexpr int SUMMARY_ROW_TRANSFUSION = 1;
 constexpr int SUMMARY_ROW_STI_CLINIC = 2;
 constexpr int SUMMARY_ROW_OTHER_VISIT = 3;
 constexpr int SUMMARY_ROW_PRENATAL = 5;
+constexpr int SUMMARY_ROW_TOTAL = static_cast<int>(std::size(SUMMARY_ROWS)) - 1;
+
+constexpr int SUMMARY_DISPLAY_ROWS[] = {
+    SUMMARY_ROW_TOTAL,
+    SUMMARY_ROW_PREOPERATIVE,
+    SUMMARY_ROW_TRANSFUSION,
+    SUMMARY_ROW_STI_CLINIC,
+    SUMMARY_ROW_OTHER_VISIT,
+    4,
+    SUMMARY_ROW_PRENATAL,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+};
 
 enum ControlId {
     IDC_YEAR = 6401,
@@ -133,6 +169,8 @@ enum ControlId {
     IDC_SOURCE = 6407,
     IDC_EXPORT = 6408,
     IDC_UPLOAD_TEMPLATE = 6409,
+    IDC_EXPORT_DETAILS = 6410,
+    IDC_METHODOLOGY_SUMMARY = 6411,
 };
 
 struct HivStatisticsState {
@@ -142,10 +180,13 @@ struct HivStatisticsState {
     HWND source = nullptr;
     HWND query = nullptr;
     HWND exportButton = nullptr;
+    HWND exportDetailsButton = nullptr;
     HWND uploadTemplateButton = nullptr;
     HWND summary = nullptr;
+    HWND methodologySummary = nullptr;
     HWND details = nullptr;
     HWND status = nullptr;
+    search::PageFeedback feedback;
     HBRUSH bgBrush = nullptr;
     bool querying = false;
     bool hasLoadedResult = false;
@@ -225,7 +266,7 @@ std::wstring selectedComboText(HWND combo) {
 }
 
 void setStatus(HivStatisticsState* st, const std::wstring& text) {
-    if (st && st->status) SetWindowTextW(st->status, text.c_str());
+    if (st) search::set_page_status(st->feedback, text);
 }
 
 int summaryScreeningCount(const search::HivStatSummary& summary, int row) {
@@ -236,7 +277,7 @@ int summaryScreeningCount(const search::HivStatSummary& summary, int row) {
         case SUMMARY_ROW_OTHER_VISIT: return summary.other_visit_screening_count;
         case SUMMARY_ROW_PRENATAL: return summary.prenatal_screening_count;
         default:
-            return row == static_cast<int>(std::size(SUMMARY_ROWS)) - 1 ? summary.screening_count : 0;
+            return row == SUMMARY_ROW_TOTAL ? summary.screening_count : 0;
     }
 }
 
@@ -248,7 +289,7 @@ int summaryPositiveCount(const search::HivStatSummary& summary, int row) {
         case SUMMARY_ROW_OTHER_VISIT: return summary.other_visit_positive_count;
         case SUMMARY_ROW_PRENATAL: return summary.prenatal_positive_count;
         default:
-            return row == static_cast<int>(std::size(SUMMARY_ROWS)) - 1 ? summary.positive_count : 0;
+            return row == SUMMARY_ROW_TOTAL ? summary.positive_count : 0;
     }
 }
 
@@ -511,8 +552,13 @@ std::wstring findHivDocxTemplate() {
 }
 
 void updateExportButton(HivStatisticsState* st) {
-    if (!st || !st->exportButton) return;
-    EnableWindow(st->exportButton, st->hasLoadedResult && !findHivDocxTemplate().empty());
+    if (!st) return;
+    if (st->exportButton) {
+        EnableWindow(st->exportButton, st->hasLoadedResult && !findHivDocxTemplate().empty());
+    }
+    if (st->exportDetailsButton) {
+        EnableWindow(st->exportDetailsButton, st->hasLoadedResult && !st->rows.empty());
+    }
 }
 
 bool ensureDirectory(const std::wstring& path) {
@@ -718,6 +764,13 @@ bool writeDocxFromTemplate(const std::wstring& templatePath, const std::wstring&
     return writeFileBytes(outputPath, out);
 }
 
+std::wstring sourceSuffix(HWND source) {
+    const std::wstring sourceLabel = selectedComboText(source);
+    if (sourceLabel == L"新院") return L" - 新院";
+    if (sourceLabel == L"老院") return L" - 老院";
+    return L" - 全部";
+}
+
 void exportStatistics(HWND hwnd, HivStatisticsState* st) {
     if (!st || !st->hasLoadedResult) {
         MessageBoxW(hwnd, L"请先查询统计数据后再导出。", WINDOW_TITLE, MB_ICONWARNING);
@@ -728,18 +781,8 @@ void exportStatistics(HWND hwnd, HivStatisticsState* st) {
 
     const int year = intText(st->year, 0);
     const int month = selectedMonth(st->month);
-    // Build filename with location suffix: 2026年4月HIV检测表 - 全部.docx
-    wchar_t suffix[16] = L"";
-    const std::wstring sourceLabel = selectedComboText(st->source);
-    if (sourceLabel == L"新院") {
-        swprintf(suffix, 16, L" - 新院");
-    } else if (sourceLabel == L"老院") {
-        swprintf(suffix, 16, L" - 老院");
-    } else {
-        swprintf(suffix, 16, L" - 全部");
-    }
     wchar_t name[160]{};
-    swprintf(name, 160, L"%04d年%d月HIV检测表%s.docx", year, month, suffix);
+    swprintf(name, 160, L"%04d年%d月HIV检测表%s.docx", year, month, sourceSuffix(st->source).c_str());
     std::wstring path = folder;
     if (!path.empty() && path.back() != L'\\' && path.back() != L'/') {
         path += L"\\";
@@ -760,6 +803,117 @@ void exportStatistics(HWND hwnd, HivStatisticsState* st) {
     }
     setStatus(st, L"已导出统计表：" + path);
     MessageBoxW(hwnd, (L"已导出统计表：\n" + path).c_str(), WINDOW_TITLE, MB_ICONINFORMATION);
+}
+
+std::wstring defaultDetailXlsxFilename(HivStatisticsState* st) {
+    const int year = intText(st->year, 0);
+    const int month = selectedMonth(st->month);
+    wchar_t name[160]{};
+    swprintf(name, 160, L"%04d年%d月HIV检测明细表%s.xlsx", year, month, sourceSuffix(st->source).c_str());
+    return name;
+}
+
+bool chooseDetailXlsxPath(HWND owner, HivStatisticsState* st, std::wstring& path) {
+    wchar_t buffer[MAX_PATH]{};
+    const std::wstring defaultName = defaultDetailXlsxFilename(st);
+    lstrcpynW(buffer, defaultName.c_str(), MAX_PATH);
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Excel 工作簿 (*.xlsx)\0*.xlsx\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = buffer;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"xlsx";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (!GetSaveFileNameW(&ofn)) return false;
+    path = buffer;
+    return true;
+}
+
+std::string detailExportValue(const search::HivStatDetailRow& row, int col) {
+    switch (col) {
+        case DetailMachine: return row.machine_name.empty() ? row.mach_code : row.machine_name;
+        case DetailSampleSource: return row.sample_source;
+        case DetailMethodology: return row.methodology;
+        case DetailLabDepartment: return row.lab_department;
+        case DetailItemCode: return row.item_code;
+        case DetailItemName: return row.item_name;
+        case DetailReportNo: return row.rep_no;
+        case DetailBarcode: return row.txm_no;
+        case DetailSampleNo: return row.oper_no;
+        case DetailPatientNo: return row.patient_no;
+        case DetailName: return row.name;
+        case DetailCompletedBloodApplyForms: return row.completed_blood_apply_forms;
+        case DetailPatientType: return row.patient_type;
+        case DetailDept: return row.dept_name;
+        case DetailResult: return row.result;
+        case DetailLowerBound: return row.lower_bound;
+        case DetailUpperBound: return row.upper_bound;
+        case DetailPositive: return row.positive;
+        case DetailReportTime: return row.report_time;
+        default: return {};
+    }
+}
+
+void exportDetailsXlsx(HWND hwnd, HivStatisticsState* st) {
+    if (!st || !st->hasLoadedResult) {
+        MessageBoxW(hwnd, L"请先查询统计数据后再导出明细。", WINDOW_TITLE, MB_ICONWARNING);
+        return;
+    }
+    if (st->rows.empty()) {
+        MessageBoxW(hwnd, L"当前没有可导出的 HIV 明细。", WINDOW_TITLE, MB_ICONINFORMATION);
+        return;
+    }
+
+    std::wstring path;
+    if (!chooseDetailXlsxPath(hwnd, st, path)) return;
+
+    std::vector<std::string> headers;
+    for (int col = 0; col < static_cast<int>(std::size(DETAIL_COLUMNS)); ++col) {
+        headers.push_back(search::wide_to_utf8(DETAIL_COLUMNS[col].title));
+    }
+    std::string error;
+    if (!search::write_xlsx_file(
+            path, "HIV检测明细", headers, st->rows.size(),
+            [st](size_t row, size_t column) {
+                return detailExportValue(st->rows[row], static_cast<int>(column));
+            }, error)) {
+        MessageBoxW(hwnd, L"导出明细表失败，请确认目标文件可写。", WINDOW_TITLE, MB_ICONERROR);
+        return;
+    }
+    setStatus(st, L"已导出明细表：" + path);
+    MessageBoxW(hwnd, (L"已导出明细表：\n" + path).c_str(), WINDOW_TITLE, MB_ICONINFORMATION);
+}
+
+void openRegularReportForRow(HWND owner, HivStatisticsState* st, int index) {
+    if (!st) return;
+    if (index < 0) {
+        index = ListView_GetNextItem(st->details, -1, LVNI_SELECTED);
+    }
+    if (index < 0 || index >= static_cast<int>(st->rows.size())) return;
+
+    const auto& row = st->rows[static_cast<size_t>(index)];
+    if (search::trim(row.rep_no).empty() || search::trim(row.mach_code).empty() ||
+        search::trim(row.report_time).empty()) {
+        MessageBoxW(owner,
+                    L"当前 HIV 明细缺少报告号、检验仪器或报告时间，无法跳转到常规报告。",
+                    WINDOW_TITLE, MB_ICONWARNING);
+        return;
+    }
+
+    auto* target = new RegularReportOpenTarget;
+    target->rep_no = search::trim(row.rep_no);
+    target->oper_no = search::trim(row.oper_no);
+    target->inspect_date = search::trim(row.report_time);
+    target->mach_code = search::trim(row.mach_code);
+    target->mach_name = search::trim(row.machine_name);
+    target->room_code = search::trim(row.room_code);
+
+    HWND regular = create_regular_report_module(st->ctx);
+    if (!regular || !PostMessageW(regular, WM_REGULAR_OPEN_REPORT, 0, reinterpret_cast<LPARAM>(target))) {
+        delete target;
+        MessageBoxW(owner, L"常规报告页面打开失败。", WINDOW_TITLE, MB_ICONERROR);
+    }
 }
 
 template <size_t N>
@@ -783,6 +937,7 @@ void populateDetails(HivStatisticsState* st);
 std::string detailSortValue(const search::HivStatDetailRow& row, int col) {
     switch (col) {
         case DetailMachine: return row.machine_name.empty() ? row.mach_code : row.machine_name;
+        case DetailSampleSource: return row.sample_source;
         case DetailMethodology: return row.methodology;
         case DetailLabDepartment: return row.lab_department;
         case DetailItemCode: return row.item_code;
@@ -880,6 +1035,12 @@ void initSummaryList(HWND list) {
     addColumns(list, SUMMARY_COLUMNS);
 }
 
+void initMethodologySummaryList(HWND list) {
+    ListView_DeleteAllItems(list);
+    while (ListView_DeleteColumn(list, 0)) {}
+    addColumns(list, METHODOLOGY_SUMMARY_COLUMNS);
+}
+
 void initDetailList(HWND list) {
     ListView_DeleteAllItems(list);
     while (ListView_DeleteColumn(list, 0)) {}
@@ -894,35 +1055,62 @@ void setSummaryCounts(HWND list, int row, int screeningCount, int positiveCount)
     setCell(list, row, 2, buf);
 }
 
-void populateSummary(HivStatisticsState* st) {
-    ListView_DeleteAllItems(st->summary);
-    for (int i = 0; i < static_cast<int>(std::size(SUMMARY_ROWS)); ++i) {
+void populateMethodologySummary(HivStatisticsState* st) {
+    if (!st || !st->methodologySummary) return;
+    ListView_DeleteAllItems(st->methodologySummary);
+    struct MethodologyRow {
+        const wchar_t* name;
+        int screeningCount;
+        int positiveCount;
+    };
+    const MethodologyRow rows[] = {
+        {L"化学发光法", st->statSummary.chemiluminescence_screening_count,
+         st->statSummary.chemiluminescence_positive_count},
+        {L"酶免法", st->statSummary.elisa_screening_count,
+         st->statSummary.elisa_positive_count},
+    };
+    for (int i = 0; i < static_cast<int>(std::size(rows)); ++i) {
         LVITEMW item{};
         item.mask = LVIF_TEXT;
         item.iItem = i;
-        item.pszText = const_cast<wchar_t*>(SUMMARY_ROWS[i]);
+        item.pszText = const_cast<wchar_t*>(rows[i].name);
+        ListView_InsertItem(st->methodologySummary, &item);
+        setSummaryCounts(st->methodologySummary, i, rows[i].screeningCount, rows[i].positiveCount);
+    }
+}
+
+void populateSummary(HivStatisticsState* st) {
+    if (!st || !st->summary) return;
+    ListView_DeleteAllItems(st->summary);
+    for (int i = 0; i < static_cast<int>(std::size(SUMMARY_DISPLAY_ROWS)); ++i) {
+        const int summaryRow = SUMMARY_DISPLAY_ROWS[i];
+        LVITEMW item{};
+        item.mask = LVIF_TEXT | LVIF_PARAM;
+        item.iItem = i;
+        item.pszText = const_cast<wchar_t*>(SUMMARY_ROWS[summaryRow]);
+        item.lParam = summaryRow;
         ListView_InsertItem(st->summary, &item);
-        if (i == SUMMARY_ROW_PREOPERATIVE) {
+        if (summaryRow == SUMMARY_ROW_PREOPERATIVE) {
             setSummaryCounts(st->summary, i,
                              st->statSummary.preoperative_screening_count,
                              st->statSummary.preoperative_positive_count);
-        } else if (i == SUMMARY_ROW_TRANSFUSION) {
+        } else if (summaryRow == SUMMARY_ROW_TRANSFUSION) {
             setSummaryCounts(st->summary, i,
                              st->statSummary.transfusion_screening_count,
                              st->statSummary.transfusion_positive_count);
-        } else if (i == SUMMARY_ROW_STI_CLINIC) {
+        } else if (summaryRow == SUMMARY_ROW_STI_CLINIC) {
             setSummaryCounts(st->summary, i,
                              st->statSummary.sti_clinic_screening_count,
                              st->statSummary.sti_clinic_positive_count);
-        } else if (i == SUMMARY_ROW_OTHER_VISIT) {
+        } else if (summaryRow == SUMMARY_ROW_OTHER_VISIT) {
             setSummaryCounts(st->summary, i,
                              st->statSummary.other_visit_screening_count,
                              st->statSummary.other_visit_positive_count);
-        } else if (i == SUMMARY_ROW_PRENATAL) {
+        } else if (summaryRow == SUMMARY_ROW_PRENATAL) {
             setSummaryCounts(st->summary, i,
                              st->statSummary.prenatal_screening_count,
                              st->statSummary.prenatal_positive_count);
-        } else if (i == static_cast<int>(std::size(SUMMARY_ROWS)) - 1) {
+        } else if (summaryRow == SUMMARY_ROW_TOTAL) {
             setSummaryCounts(st->summary, i,
                              st->statSummary.screening_count,
                              st->statSummary.positive_count);
@@ -931,6 +1119,7 @@ void populateSummary(HivStatisticsState* st) {
 }
 
 void populateDetails(HivStatisticsState* st) {
+    if (!st || !st->details) return;
     ListView_DeleteAllItems(st->details);
     for (int i = 0; i < static_cast<int>(st->rows.size()); ++i) {
         const auto& row = st->rows[static_cast<size_t>(i)];
@@ -940,23 +1129,24 @@ void populateDetails(HivStatisticsState* st) {
         auto first = search::utf8_to_wide(row.machine_name.empty() ? row.mach_code : row.machine_name);
         item.pszText = const_cast<wchar_t*>(first.c_str());
         ListView_InsertItem(st->details, &item);
-        setCellUtf8(st->details, i, 1, row.methodology);
-        setCellUtf8(st->details, i, 2, row.lab_department);
-        setCellUtf8(st->details, i, 3, row.item_code);
-        setCellUtf8(st->details, i, 4, row.item_name);
-        setCellUtf8(st->details, i, 5, row.rep_no);
-        setCellUtf8(st->details, i, 6, row.txm_no);
-        setCellUtf8(st->details, i, 7, row.oper_no);
-        setCellUtf8(st->details, i, 8, row.patient_no);
-        setCellUtf8(st->details, i, 9, row.name);
-        setCellUtf8(st->details, i, 10, row.completed_blood_apply_forms);
-        setCellUtf8(st->details, i, 11, row.patient_type);
-        setCellUtf8(st->details, i, 12, row.dept_name);
-        setCellUtf8(st->details, i, 13, row.result);
-        setCellUtf8(st->details, i, 14, row.lower_bound);
-        setCellUtf8(st->details, i, 15, row.upper_bound);
-        setCellUtf8(st->details, i, 16, row.positive);
-        setCellUtf8(st->details, i, 17, row.report_time);
+        setCellUtf8(st->details, i, DetailSampleSource, row.sample_source);
+        setCellUtf8(st->details, i, DetailMethodology, row.methodology);
+        setCellUtf8(st->details, i, DetailLabDepartment, row.lab_department);
+        setCellUtf8(st->details, i, DetailItemCode, row.item_code);
+        setCellUtf8(st->details, i, DetailItemName, row.item_name);
+        setCellUtf8(st->details, i, DetailReportNo, row.rep_no);
+        setCellUtf8(st->details, i, DetailBarcode, row.txm_no);
+        setCellUtf8(st->details, i, DetailSampleNo, row.oper_no);
+        setCellUtf8(st->details, i, DetailPatientNo, row.patient_no);
+        setCellUtf8(st->details, i, DetailName, row.name);
+        setCellUtf8(st->details, i, DetailCompletedBloodApplyForms, row.completed_blood_apply_forms);
+        setCellUtf8(st->details, i, DetailPatientType, row.patient_type);
+        setCellUtf8(st->details, i, DetailDept, row.dept_name);
+        setCellUtf8(st->details, i, DetailResult, row.result);
+        setCellUtf8(st->details, i, DetailLowerBound, row.lower_bound);
+        setCellUtf8(st->details, i, DetailUpperBound, row.upper_bound);
+        setCellUtf8(st->details, i, DetailPositive, row.positive);
+        setCellUtf8(st->details, i, DetailReportTime, row.report_time);
     }
 }
 
@@ -969,12 +1159,15 @@ void resizeLayout(HWND hwnd, HivStatisticsState* st) {
     const int pad = S(hwnd, 10);
     const int topH = S(hwnd, 42);
     const int summaryH = S(hwnd, 232);
+    const int methodologyH = S(hwnd, 72);
     const int statusH = S(hwnd, 24);
 
     MoveWindow(st->summary, pad, topH + pad, w - pad * 2, summaryH, TRUE);
-    MoveWindow(st->details, pad, topH + summaryH + pad * 2, w - pad * 2,
-               (std::max)(S(hwnd, 80), h - topH - summaryH - pad * 3 - statusH), TRUE);
+    MoveWindow(st->methodologySummary, pad, topH + summaryH + pad * 2, w - pad * 2, methodologyH, TRUE);
+    MoveWindow(st->details, pad, topH + summaryH + methodologyH + pad * 3, w - pad * 2,
+               (std::max)(S(hwnd, 80), h - topH - summaryH - methodologyH - pad * 4 - statusH), TRUE);
     MoveWindow(st->status, pad, h - statusH - S(hwnd, 4), w - pad * 2, statusH, TRUE);
+    search::layout_page_feedback(st->feedback);
 }
 
 void runQuery(HWND hwnd, HivStatisticsState* st) {
@@ -996,7 +1189,9 @@ void runQuery(HWND hwnd, HivStatisticsState* st) {
     st->hasLoadedResult = false;
     EnableWindow(st->query, FALSE);
     EnableWindow(st->exportButton, FALSE);
+    EnableWindow(st->exportDetailsButton, FALSE);
     setStatus(st, L"正在查询 HIV 抗体检测统计...");
+    search::show_page_activity(st->feedback, L"正在查询 HIV 抗体检测统计，请稍候…");
 
     search::HivStatQuery query;
     query.connection_string = search::wide_to_utf8(connection);
@@ -1047,11 +1242,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessageW(st->source, CB_SETCURSEL, 0, 0);
             st->query = search::create_button(hwnd, IDC_QUERY, L"查询", S(hwnd, 456), S(hwnd, 9), S(hwnd, 86), S(hwnd, 26));
             st->exportButton = search::create_button(hwnd, IDC_EXPORT, L"导出统计表", S(hwnd, 548), S(hwnd, 9), S(hwnd, 112), S(hwnd, 26));
+            st->exportDetailsButton = search::create_button(hwnd, IDC_EXPORT_DETAILS, L"导出明细表",
+                                                             S(hwnd, 666), S(hwnd, 9), S(hwnd, 112), S(hwnd, 26));
             st->uploadTemplateButton = search::create_button(hwnd, IDC_UPLOAD_TEMPLATE, L"上传模版",
-                                                              S(hwnd, 666), S(hwnd, 9), S(hwnd, 112), S(hwnd, 26));
+                                                              S(hwnd, 784), S(hwnd, 9), S(hwnd, 112), S(hwnd, 26));
             updateExportButton(st);
-            label(hwnd, L"导出统计表仅使用当前页面汇总结果。",
-                  S(hwnd, 792), S(hwnd, 12), S(hwnd, 520), S(hwnd, 24), SS_LEFT);
+            label(hwnd, L"导出统计表使用汇总结果，导出明细表使用下方当前明细。",
+                  S(hwnd, 910), S(hwnd, 12), S(hwnd, 520), S(hwnd, 24), SS_LEFT);
 
             st->summary = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                                           WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
@@ -1059,15 +1256,36 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ListView_SetExtendedListViewStyle(st->summary, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
             initSummaryList(st->summary);
 
+            st->methodologySummary = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                                                     WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
+                                                     0, 0, 0, 0, hwnd,
+                                                     win32_control_id(IDC_METHODOLOGY_SUMMARY),
+                                                     GetModuleHandleW(nullptr), nullptr);
+            ListView_SetExtendedListViewStyle(st->methodologySummary, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+            initMethodologySummaryList(st->methodologySummary);
+
             st->details = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                                           WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
                                           0, 0, 0, 0, hwnd, win32_control_id(IDC_DETAILS), GetModuleHandleW(nullptr), nullptr);
             ListView_SetExtendedListViewStyle(st->details, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
             initDetailList(st->details);
 
-            st->status = label(hwnd, L"请选择年份和月份后查询；未上传匹配模版时导出不可用。", 0, 0, 0, 0, SS_LEFT);
+            st->status = label(hwnd, L"请选择年份和月份后查询；未上传匹配模版时统计表导出不可用。", 0, 0, 0, 0, SS_LEFT);
+            search::initialize_page_feedback(st->feedback, hwnd, st->status,
+                                             st->details, st->ctx.uiFont);
+            search::add_page_tooltip(st->feedback, st->query,
+                                     L"按年份、月份和检验科查询 HIV 抗体检测统计。");
+            search::add_page_tooltip(st->feedback, st->exportButton,
+                                     L"使用当前汇总结果生成统计表。");
+            search::add_page_tooltip(st->feedback, st->exportDetailsButton,
+                                     L"导出当前已加载、已排序的全部检测明细。");
+            search::add_page_tooltip(st->feedback, st->uploadTemplateButton,
+                                     L"上传与当前统计表格式匹配的 Word 模版。");
+            search::add_page_tooltip(st->feedback, st->details,
+                                     L"单击列标题排序；双击记录可跳转常规报告。");
             search::apply_font_to_children(hwnd, st->ctx.uiFont);
             populateSummary(st);
+            populateMethodologySummary(st);
             resizeLayout(hwnd, st);
             return 0;
         }
@@ -1075,12 +1293,17 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             resizeLayout(hwnd, st);
             return 0;
         case WM_COMMAND:
+            if (st && search::handle_page_feedback_command(st->feedback, lp, WINDOW_TITLE)) return 0;
             if (LOWORD(wp) == IDC_QUERY) {
                 runQuery(hwnd, st);
                 return 0;
             }
             if (LOWORD(wp) == IDC_EXPORT) {
                 exportStatistics(hwnd, st);
+                return 0;
+            }
+            if (LOWORD(wp) == IDC_EXPORT_DETAILS) {
+                exportDetailsXlsx(hwnd, st);
                 return 0;
             }
             if (LOWORD(wp) == IDC_UPLOAD_TEMPLATE) {
@@ -1090,6 +1313,16 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_NOTIFY: {
             auto* nm = reinterpret_cast<NMHDR*>(lp);
+            if (nm->idFrom == IDC_SUMMARY && nm->code == NM_CUSTOMDRAW) {
+                auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(lp);
+                if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+                if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                    if (static_cast<int>(cd->nmcd.lItemlParam) == SUMMARY_ROW_TOTAL) {
+                        cd->clrTextBk = COLOR_TOTAL_ROW;
+                    }
+                    return CDRF_NEWFONT;
+                }
+            }
             if (nm->idFrom == IDC_DETAILS && nm->code == NM_CUSTOMDRAW) {
                 auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(lp);
                 if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
@@ -1107,6 +1340,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 sortDetailsByColumn(st, lv->iSubItem);
                 return 0;
             }
+            if (st && nm->idFrom == IDC_DETAILS && nm->code == NM_DBLCLK) {
+                auto* item = reinterpret_cast<NMITEMACTIVATE*>(lp);
+                openRegularReportForRow(hwnd, st, item ? item->iItem : -1);
+                return 0;
+            }
             break;
         }
         case WM_HIV_STATS_LOADED: {
@@ -1114,11 +1352,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!st) return 0;
             st->querying = false;
             EnableWindow(st->query, TRUE);
+            search::hide_page_activity(st->feedback);
             st->hasLoadedResult = false;
             updateExportButton(st);
             if (!result->ok) {
-                setStatus(st, L"查询失败：" + search::utf8_to_wide(result->error));
-                MessageBoxW(hwnd, search::utf8_to_wide(result->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
+                search::show_page_alert(st->feedback,
+                    L"查询失败：" + search::utf8_to_wide(result->error));
                 return 0;
             }
             st->hasLoadedResult = true;
@@ -1126,6 +1365,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             st->rows = std::move(result->rows);
             sortDetailRowsForDisplay(st);
             populateSummary(st);
+            populateMethodologySummary(st);
             populateDetails(st);
             wchar_t status[160]{};
             swprintf(status, 160, L"查询完成：初筛检测数 %d，初筛阳性数 %d，明细 %d 行。",
@@ -1134,7 +1374,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             updateExportButton(st);
             std::wstring statusText = status;
             if (findHivDocxTemplate().empty()) {
-                statusText += L" 未上传匹配模版，导出不可用。";
+                statusText += L" 未上传匹配模版，统计表导出不可用。";
             }
             setStatus(st, statusText);
             return 0;
@@ -1146,6 +1386,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_CTLCOLORSTATIC:
+            if (st) {
+                LRESULT result = 0;
+                if (search::page_feedback_static_color(
+                        st->feedback, reinterpret_cast<HDC>(wp),
+                        reinterpret_cast<HWND>(lp), result)) return result;
+            }
             SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
             return reinterpret_cast<LRESULT>(st ? st->bgBrush : nullptr);
         case WM_ERASEBKGND: {
@@ -1156,6 +1402,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DESTROY:
             if (st) {
+                search::destroy_page_feedback(st->feedback);
                 if (st->bgBrush) DeleteObject(st->bgBrush);
                 RemovePropW(hwnd, PROP_STATE);
                 delete st;

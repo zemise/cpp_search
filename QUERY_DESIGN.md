@@ -121,9 +121,13 @@ packet size=4096;user id=...;password=...;data source=...;persist security info=
 | `JC_dept_mz_zy` | 临床申请科室字典，根据 `TYPE / TYPENAME` 区分门诊或住院后解析 `DEPT_CODE -> DEPT_NAME` | 门诊：`mzksid`, `mzksmc`；住院：`zyksid`, `zyksmc`；`delete_bit` |
 | `JC_EMPLOYEE_PROPERTY` | 人员字典，用于“检验者”和“审核者”显示 | `EMPLOYEE_ID`, `NAME`, `D_CODE`, `YS_CODE`, `TYPENAME` |
 | `LS_AS_RESULTP` | 原候选检验者来源，但实测覆盖率低，当前不作为主来源 | `REP_NO`, `EditName`, `ChkNAME`, `TXM_NO` |
-| `LS_XK_BloodRequestApply` | 输血申请主表，输血结果查询列表主来源 | `ApplyFormNO`, `Apply_Time`, `Plan_Date`, `ApplyForm_Statue`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `TranProperty` |
-| `LS_XK_BloodRequestApplySon` | 输血申请子表，用于按申请单聚合申请成分 | `ApplyFormNO`, `ApplyComposition`, `ApplyNum`, `ApplyUnit` |
-| `LS_XK_BloodCrossMatch` | 交叉配血记录表，用于按输血申请号关联病人和配血审核信息 | `ApplyFormNO`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `VerifyState`, `Match_Date` |
+| `LS_XK_BloodRequestApply` | 输血申请主表，输血结果查询列表主来源 | `ApplyFormNO`, `Apply_Time`, `Plan_Date`, `ApplyForm_Statue`, `Remark`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `TranProperty` |
+| `LS_XK_BloodRequestApplySon` | 输血申请子表，用于按申请单聚合申请成分；大量输血申请量对照按成分大类 ID 分类 | `ApplyFormNO`, `CompositionBig_ID`, `ApplyComposition`, `ApplyNum`, `ApplyUnit` |
+| `LS_XK_BloodCrossMatch` | 交叉配血记录表，用于按输血申请号关联病人和配血审核信息 | `ApplyFormNO`, `Patient_NO`, `Patient_NOType`, `Patient_Name`, `VerifyState`, `BloodInID`, `Match_Date` |
+| `LS_XK_BloodInfo` | 血袋库存表，通过成分 ID 关联实际血袋规格和类型 | `ID`, `CompositionID`, `BloodBagNO`, `CmpProductCode` |
+| `LS_XK_BloodOutInfo` | 血袋出库表，提供大量输血默认事件时间 | `BloodInID`, `BloodOut_Date` |
+| `LS_XK_B_CompositionInfo` | 血液成分字典；实际输血量按类型 ID 分类，名称仅展示 | `ID`, `Blood_Composition`, `Norm`, `Unit`, `CompositionTypeID`, `Del_Flat` |
+| `LS_XK_B_CompositionType` | 成分类型字典；现场确认编码 `1=红细胞、2=血浆、3=冷沉淀、4=血小板` | `ID`, `CompositionType` |
 
 ### 临床申请科室映射
 
@@ -148,10 +152,14 @@ packet size=4096;user id=...;password=...;data source=...;persist security info=
 | 输血申请时间 | `Apply_Time` |
 | 输血计划时间 | `Plan_Date` |
 | 申请状态 | `ApplyForm_Statue`，当前已确认值为 `已审核`、`未审核`、`已完结` |
+| 驳回原因 | `Remark` |
 | 病人号 | `Patient_NO` |
 | 病人类型 | `Patient_NOType` |
 | 病人姓名 | `Patient_Name` |
-| 紧急程度/输血性质 | `TranProperty` |
+| 紧急程度/输血性质、申请类型当前显示来源 | `TranProperty` |
+| 用血备注 | `UseBloodNote` |
+| 输血目的/申请目的 | `Apply_Purpose` |
+| 紧急级别原始值 | `UrgencyLevel`，当前输血查询原样显示，未确认值域 |
 
 ### 申请成分
 
@@ -162,6 +170,37 @@ ApplyCompositionApplyNumApplyUnit;
 ```
 
 如果同一申请单对应多行子表记录，则在同一列表单元格中用分号拼接。
+
+### 统计分析页面公共反馈
+
+`统计分析管理` 下的 HIV 抗体检测统计、急诊样本统计、免疫重复项目统计、备血统计、大量输血统计和输血单统计统一使用 `page_feedback.*`。组件以各页面主明细 ListView 作为定位锚点，查询期间在明细区中央显示白色加载卡片、说明文字和 `PBS_MARQUEE` 不确定进度条；结果消息返回 UI 线程后，无论成功或失败均通过 `DeferWindowPos` 批量隐藏进度条、说明文字和卡片，并统一重绘原卡片区域，避免结束阶段出现没有进度条的灰色空卡片。
+
+普通成功信息持续写入页面状态行。后台查询失败写入红色可点击 Alert，用户需要完整错误时再点击打开详情 Modal；日期或参数无效、数据库未配置等无法启动操作的前置错误继续直接使用 Modal。主要查询、导出、筛选和明细控件提供 Tooltip。统计页不显示 Spinner，也不使用自动消失的 Toast。该公共反馈仅管理 UI 状态，不改变查询 SQL、内存统计、排序和全量导出逻辑。
+
+### 备血统计
+
+`统计分析管理 -> 备血统计` 直接读取申请主表，不关联申请成分子表。筛选时间为 `Apply_Time`，使用左闭右开的自然日范围：
+
+```text
+Apply_Time >= 开始日期
+AND Apply_Time < DATEADD(day, 1, 结束日期)
+```
+
+默认只查询 `ISNULL(Delete_Bit,0)=0` 且 `ApplyForm_Statue<>'已删除'` 的有效记录；申请状态可精确筛选 `未审核 / 已审核 / 已完结 / 已驳回`。页面勾选“包含已删除”后取消有效记录限制，将 `Delete_Bit=1` 或状态为“已删除”的申请纳入查询。备血命中条件为：
+
+```text
+LTRIM(RTRIM(ISNULL(TranProperty,''))) = '备血'
+OR
+ISNULL(UseBloodNote,'') LIKE '%备血%'
+OR
+ISNULL(Apply_Purpose,'') LIKE '%备血%'
+```
+
+统计按去空格后的唯一 `ApplyFormNO` 去重。分别汇总申请类型命中、用血备注命中、输血目的命中、多项命中和任一命中的备血申请单总数；同一申请单命中多个条件时在总数中只计一次。页面另按未审核、已审核、已完结、已驳回、已删除和其他状态显示分布，并在明细与 Excel 工作簿中保留 `Delete_Bit` 删除标志。申请状态筛选为 `全部 / 未审核 / 已审核 / 已完结 / 已驳回`，备血类型筛选为 `全部 / 申请类型 / 用血备注 / 输血目的 / 多项命中`。院区下拉提供 `全部 / 老院 / 新院`；C++ 按 `Apply_Dept` 是否包含“滨水”派生新院或老院，并在派生后按所选院区过滤，再计算汇总、状态分布和明细，不在 SQL 中增加院区 `OR + LIKE`。空申请单号不进入正式总数，异常数按物理行的 `Apply_Dept` 派生院区后过滤。`UrgencyLevel` 不参与备血统计。主查询返回同批必要明细，页面备血类型筛选、排序和 Excel 导出均使用当前内存结果，不额外查询 LIS；导出文件名使用最后一次成功查询的日期和院区。双击未删除明细会通过申请单号和申请日期打开或激活“输血结果查询”，自动精确查询、选中对应行并刷新详情，但不切换其右侧页签；已删除明细不跳转。顶部采用两行筛选布局并按当前字体动态测量标签宽度。
+
+### 输血单统计
+
+`统计分析管理 -> 输血单统计` 仅读取 `LS_XK_BloodRequestApply`，不关联申请成分、交叉配血、出库或血袋表。统计时间按 `Apply_Time >= 开始日期 AND Apply_Time < DATEADD(day,1,结束日期)`，以去空格后的唯一 `ApplyFormNO` 为主键；空申请单号不进入正式总数并保留底层异常计数。页面默认纳入未审核、已审核和已完结，分别提供默认不勾选的“包含已驳回”和“包含已删除”，其中 `Delete_Bit=1` 或状态为已删除统一归为已删除。未知状态不进入正式申请单总数；同一申请单状态冲突时按 `已删除 > 已驳回 > 已完结 > 已审核 > 未审核 > 其他` 归类。院区在 C++ 内存中按 `Apply_Dept` 是否包含“滨水”派生为新院或老院，过滤后再计算总数和状态分布。唯一汇总 ListView 依次显示总数、未审核、已审核、已完结、已驳回、已删除、紧急、常规、备血；其上方使用自绘分组标题将列划为“总体、按申请状态分类、按紧急程度分类”。分组标题和数据单元格采用相同色系：总体浅灰、申请状态浅蓝、紧急程度浅橙，“紧急”数值使用红色文字；不显示分类合计提示和异常汇总 ListView。紧急程度按完成申请单去重、院区过滤及状态勾选过滤后的 `TranProperty` 精确统计，其中 `紧急(电话联系输血科)` 归入紧急。下方明细在“院区”之后显示“紧急程度”，与“输血结果查询”左侧列表相同，直接显示 `TranProperty`；其去空格值精确等于 `紧急(电话联系输血科)` 时，仅该单元格覆盖为 `RGB(234,51,35)` 红色背景。明细还在“申请状态”之后显示“原因”，直接读取 `Remark`，用于查看已驳回申请单原因；新增明细列均进入 Excel `.xlsx` 导出。明细支持状态配色、表头本地排序和未删除申请单跳转。
 
 ### 交叉配血记录
 
@@ -177,6 +216,49 @@ ApplyCompositionApplyNumApplyUnit;
 | 配血时间 | `Match_Date` |
 
 后续如果输血页面需要展示交叉配血状态或配血时间，可优先按 `ApplyFormNO` 关联 `LS_XK_BloodCrossMatch`，并过滤 `Delete_Bit=0`。
+
+`输血查询` 页面当前将 `输血历史` tab 放在首位并默认展示，按当前选中申请的 `Patient_NO` 读取 `LS_XK_BloodCrossMatch`，并通过 `BloodInID` 联查出库、血袋库存和字典表来展示该病人的历史配血信息。字段顺序为：出库时间、出库人、血袋编号、产品码、血型、RH(D)、血液成分、血量、单位、配血方法、主侧结果、次侧结果、配血时间、配血者、血袋来源。其中出库时间和配血时间仍由 SQL 返回标准 `yyyy-mm-dd hh:mm:ss` 文本，列表填充时由 C++ 端格式化为 `yyyy/M/d H:mm`，避免数据库侧承担显示格式转换。
+
+主要字段来源：
+- `LS_XK_BloodCrossMatch.BloodInID = LS_XK_BloodOutInfo.BloodInID`：获取 `BloodOut_Date / BloodOut_Man`。
+- `LS_XK_BloodCrossMatch.BloodInID = LS_XK_BloodInfo.ID`：获取 `BloodBagNO / CmpProductCode`，并继续关联血型、Rh、成分和来源字典。
+- `LS_XK_BloodInfo.BloodTypeID = LS_XK_B_TypeInfo.ID`：获取 `Blood_Type`。
+- `LS_XK_BloodInfo.RhD_ID = LS_XK_B_RhInfo.ID`：获取 `Blood_RH`。
+- `LS_XK_BloodInfo.CompositionID = LS_XK_B_CompositionInfo.ID`：获取 `Blood_Composition / Norm / Unit / CompositionTypeID`；实际输血量只按 `CompositionTypeID` 分类。
+- `LS_XK_B_CompositionInfo.CompositionTypeID = LS_XK_B_CompositionType.ID`：逻辑关联成分类型；现场未发现物理外键约束。
+- `LS_XK_BloodInfo.SourceID = LS_XK_B_SourceInfo.ID`：获取 `Sources_Blood`。
+
+### 查询检验结果报告列表
+
+`输血结果查询 -> 查询检验结果` 弹窗的右侧报告列表使用专用轻量查询 `query_blood_lis_reports()`，不再复用通用 `query_reports()`。该列表只需要展示样本号、检验时间、组合项目、条码、检验者、审核者、科室代码、仪器代码，并在选择报告后按 `REP_NO` 查询明细结果，因此 SQL 只读取 `LS_AS_REPORT.REP_NO / OPER_NO / CHK_DATE / GROUP_NO / TXM_NO / OPER_CODE / REP_OPER / AGE / SEX / ROOM_CODE / MACH_CODE` 及少量人员、性别名称字段。
+
+选择报告后的右侧详情列表复用 `query_results()` 读取 `LS_AS_REPENTRY` 明细。`参考范围` 列只做显示层拼接，按下限在前、上限在后输出为 `下限~上限`，避免把 `UPBOUND / DOWNBOUND` 的历史字段映射顺序暴露到界面。
+
+按病人号查询时使用现场已确认同口径字段：`LS_XK_BloodRequestApply.Patient_NO = LS_AS_REPORT.REG_NO`。因此输血弹窗报告列表和右侧摘要都直接按 `LS_AS_REPORT.REG_NO` 过滤，不再绕行 `LS_AS_BARCODE.REG_NO + BARCODE/TXM_NO` 判断病人归属。该查询避开通用报告列表中的 `LS_AS_PATTYPE / LS_AS_SAMPLE / LS_AS_MACHINE` 等无关字典联查、同条码医嘱内容聚合和条码表相关子查询，减少数据库端行扩展、字符串聚合和逐行 `EXISTS` 成本。
+
+按名字查询用于处理输血申请病人号不足或现场需要按姓名补查的场景，但姓名可能重名。当前会先用当前输血申请病人号按 `LS_AS_REPORT.REG_NO` 查询最近一条非空 `PAT_PHONE`，取到电话后，报告列表和摘要查询都会在 `NAME LIKE` 外额外下推 `LS_AS_REPORT.PAT_PHONE = 当前电话`，使列表和摘要使用同一身份约束；如果当前病人号未能取到电话，则保留原姓名查询。弹窗会在检验摘要区下方显示身份匹配可信度提示：病人号或姓名+电话匹配为绿色提示，仅姓名匹配为橙色提示。
+
+按身份证查询用于处理同一病人多次住院号变化的场景。弹窗先使用当前输血申请病人号匹配 `ZY_INPATIENT.INPATIENT_NO`，读取该住院病人的 `SOCIAL_NO`，再查询同一 `SOCIAL_NO` 下所有非空 `INPATIENT_NO`，报告列表和摘要都用这些住院号下推 `LS_AS_REPORT.REG_NO IN (...)`。如果当前病人号在 `ZY_INPATIENT` 中未找到身份证号，则不发起宽泛查询并提示用户。身份证号仅用于数据库侧匹配，不在界面显示。
+
+报告列表支持通过系统设置 `[LisSummary] BloodLisExcludeMachines` 排除不想展示的检验科室/仪器，过滤只作用于输血弹窗报告列表，不影响右侧血型/血常规摘要。格式为 `ROOM:;ROOM:MACH1,MACH2;ROOM:MACH`，默认 `3:;71:;8:8004`，表示排除 `ROOM_CODE=3`、`ROOM_CODE=71` 的全部仪器，并额外排除 `ROOM_CODE=8 AND MACH_CODE=8004`。配置为空或无有效片段时不追加排除条件；用户在系统设置中清空该项后会保留空值，不会被默认值覆盖。
+
+报告列表还会复用 `[LisSummary] BloodTypeMachines / CbcMachines` 判断当前行是否属于血型仪器或血常规仪器。查询完成状态栏会显示当前列表命中的血型/血常规行数，便于核对配置是否匹配实际 `ROOM_CODE:MACH_CODE`；列表行本身保持系统默认绘制，不额外设置背景色。
+
+### 查询检验结果摘要
+
+`查询检验结果` 窗口右侧摘要按当前病人号或姓名查询最近一次血型鉴定、血红蛋白、血小板、不规则抗体筛查和直接抗人球蛋白试验。摘要查询使用 `LS_AS_REPORT` 联查 `LS_AS_REPENTRY`，血型、血常规、不规则抗体筛查和直接抗人球蛋白试验均按可配置 `ITEM_CODE` 匹配；血型分支、血常规分支分别下推可配置仪器范围。配置保存到 `ClientConfig.ini` 的 `[LisSummary]`：
+
+摘要显示层由弹窗父窗口在 `WM_PAINT` 中一次性绘制四行文本，不再用多个 `STATIC` 控件拼接日期和值。血型、血常规、不规则和直抗均使用“日期在前、加粗结果在后”的同一显示样式。这样查询开始时的“正在读取最近检验摘要...”和查询完成后的摘要结果只刷新同一块摘要区域，减少耗时查询期间控件各自擦除、重排导致的文字短暂断裂。
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `BloodTypeMachines` | `11:11101;64:626` | 血型鉴定摘要仪器范围 |
+| `CbcMachines` | `1:1002,1011,1012;61:613,615` | 血红蛋白/血小板摘要仪器范围 |
+| `IrregularAntibodyCodes` | `11106;91966` | 不规则抗体筛查项目代码 |
+| `DirectAntiglobulinCodes` | `11105;91965` | 直接抗人球蛋白试验项目代码 |
+| `BloodLisExcludeMachines` | `3:;71:;8:8004` | 输血弹窗报告列表排除科室/仪器；清空则不排除 |
+
+仪器范围使用成对表达：分号分组，冒号左侧为 `ROOM_CODE`，冒号右侧为该科室下允许的 `MACH_CODE`，多个仪器用逗号分隔。程序只接受数字片段，非法片段忽略；配置为空或无有效片段时不限制仪器。该过滤用于减少无关报告参与聚合。当前按现场确认口径执行强过滤：如果某一侧摘要在限定仪器范围内查不到，不再自动去掉仪器条件做二次兜底查询。
 
 ### HIV 统计中的已完结输血单申请号
 
@@ -204,19 +286,42 @@ HIV 明细查询的性能策略：
 - 三组候选报告按 `MACH_CODE` 拆成三段 `UNION ALL`，避免一个大 `OR` 条件影响 SQL Server 执行计划。
 - 报告主表查询不直接 JOIN `LS_AS_REPENTRY`，避免在月度范围上直接联查大明细表。
 - `LS_AS_MACHINE`、`LS_AS_PATTYPE`、`JC_DEPT_PROPERTY` 先作为小字典查询到 C++ 内存中，再对明细行做名称映射。
-- `全部 / 新院 / 老院` 来源筛选先根据 `JC_DEPT_PROPERTY.NAME` 分出新院/老院 `DEPT_ID` 集合，再把 `r.DEPT_CODE IN (...)` 下推到三段 HIV 主查询中；C++ 侧仍保留映射后校验，避免主 SQL 使用 `LIKE '%滨水新城%'`。
+- `全部 / 新院 / 老院` 来源筛选先根据 `JC_DEPT_PROPERTY.NAME` 分出新院 `DEPT_ID` 集合。选择 `新院` 时下推 `r.DEPT_CODE IN (新院代码...)`；选择 `老院` 时下推为 `DEPT_CODE` 为空/`NULL` 或 `r.DEPT_CODE NOT IN (新院代码...)`，使字典缺失、字典名称为空和代码为空的报告都与 C++ 侧“科室名称不含滨水新城即老院”的兜底一致；主 SQL 仍避免使用 `LIKE '%滨水新城%'`。
+- 下方明细在“方法学”前展示“样本来源”列，按当前汇总分类口径落单行分类：已匹配已完结输血申请号优先显示 `受血（制品）前检测`，其次按科室文字显示 `性病门诊`、`其他就诊检测`、`孕产期检查`，剩余显示 `术前检测`。
+- 上方样本来源分类表采用 UI 专用显示顺序，将 `合计` 放在第一行并用浅蓝背景突出；DOCX 导出仍保留原模板占位符顺序，不跟随 UI 显示顺序改变。
+- 上方样本来源分类表下方额外展示一个独立的“方法学”小汇总表，不改变原样本来源分类表列结构；当前按下方明细行的“方法学”统计 `化学发光法` 和 `酶免法` 的初筛检测数、初筛阳性数。
+- 下方明细双击行会复用常规报告的 `RegularReportOpenTarget + WM_REGULAR_OPEN_REPORT` 机制，携带 `REP_NO`、`OPER_NO`、`MACH_CODE`、`MACH_NAME`、`ROOM_CODE` 和 `REP_TIME` 跳转到 `常规报告` 并定位目标报告。
 
 HIV 统计表导出：
 
 - `导出统计表` 按钮只使用当前页面已加载的 `HivStatSummary` 汇总数据，不额外访问数据库。
 - HIV 统计表 DOCX 模版不随项目、安装包或更新包发布。用户在页面点击 `上传模版` 选择本地 DOCX 后，程序会校验 `{}` 占位符数量并复制到安装目录 `templates\HIVStatisticsTemplate.docx`；未检测到匹配模版时 `导出统计表` 按钮不可用。模板内使用从上到下、从左到右的 `{}` 占位符；客户端不依赖 Office COM 自动化，而是读取 DOCX 包并替换 `word/document.xml` 中的占位符生成新文件，从而保留模板原有版式、字体、合并单元格和页边距。
 - 导出时选择目标文件夹，默认文件名为 `YYYY年M月HIV抗体检测统计表.docx`。
-- 导出内容只填写统计汇总表；下方 listview 明细仅用于页面核对，不导出。非合计行数字为 `0` 时导出为空，合计行保留 `0`；WB 检测数、复检数、报告疫情检测数等未接入字段暂留空。
+- 导出内容只填写统计汇总表；非合计行数字为 `0` 时导出为空，合计行保留 `0`；WB 检测数、复检数、报告疫情检测数等未接入字段暂留空。
+- `导出明细表` 按钮将下方当前 listview 明细导出为 Excel `.xlsx` 工作簿，默认文件名为 `YYYY年M月HIV检测明细表 - 全部/新院/老院.xlsx`；导出使用当前已加载并已排序的内存明细，包含“样本来源”列，不额外访问数据库。
 - 当前占位符顺序为：统计年份、统计月份、院区文字、20 行样本来源分类的 `初筛检测数/初筛阳性数`、填报日期年/月/日。
 
 ## 已签收条码查询
 
-工具菜单中的 `已签收条码查询` 以 `LS_AS_BARCODE` 为主表做只读检索，不自动执行查询，等待用户点击 `查询` 或 `刷新`。当前仅开放查询能力，取消签收、取消医嘱签收、取消原因限制、导出 Excel 按钮保持禁用，不执行数据库修改。
+工具菜单中的 `已签收条码查询` 以 `LS_AS_BARCODE` 为主表做只读检索，不自动执行查询，等待用户点击 `查询` 或 `刷新`。当前开放查询、刷新和导出能力，取消签收、取消医嘱签收、取消原因限制按钮保持禁用，不执行数据库修改。
+
+查询执行时使用后台线程读取数据库。为减少慢查询期间的视觉闪烁，页面会保留上一轮列表直到新查询成功返回；成功后再暂停 ListView 重绘，清空旧行并一次性填充新结果，最后恢复绘制并统一刷新。
+
+日期类型下拉框按 `申请日期 / 签收日期 / 上机日期` 展示，默认选中 `签收日期`；开始和结束控件使用日期时间选择器，默认当天 `00:00` 至 `23:59`，查询结束条件按 `< DATEADD(minute,1,结束时间)` 处理。条形码、姓名和病人号输入框按回车会直接触发同一查询路径。
+
+第一行筛选顺序为日期范围、条形码、姓名、病人号、院区、专业组和上机状态。第二行放置取消签收状态、查询等操作按钮和状态图例，查询状态提示位于该行下方、结果列表上方，采用左对齐且左边缘与“查询”按钮左边缘对齐；窗口底部不再保留状态栏高度，ListView 向下占满剩余客户区。院区提供 `全部 / 老院 / 新院`，查询读取结果后按申请科室 `LS_AS_BARCODE.DEPT_NAME` 在 C++ 侧派生并过滤：包含“滨水”为新院，其余为老院。院区筛选后的结果再用于列表、排序和导出。
+
+`专业组` 和 `上机状态` 使用原生 ComboBox 主题外观的下拉按钮，弹出层使用 `ListView + LVS_EX_CHECKBOXES` 实现多选。专业组仅加载 `LS_AS_ROOM.DELETE_BIT=0` 且 `Dept_Code IN (102,401)` 的记录；院区为全部时显示两院专业组，老院只显示 `Dept_Code=102`，新院只显示 `Dept_Code=401`。切换院区会立即刷新专业组，并清除新院区列表中不存在的已选专业组。第一项 `全部` 是批量开关：点击后勾选当前下拉中所有具体项，再次点击则取消所有具体项；没有勾选具体项或已勾选全部具体项时，查询都按“不限定该条件”处理。下拉弹窗会按当前显示器工作区自动向下或向上展开，避免靠近屏幕边缘时被截断；按钮支持鼠标点击、`F4` 和 `Alt+↓` 打开。需要查询未完成检验时，直接在主 `上机状态` 下拉中勾选 `已签收未上机 / 已上机未审核 / 已审核未发送`，该组合摘要显示为 `未完成检验`；同时可用主 `专业组` 下拉多选限定专业组。确认查询后，结果仍回填当前 ListView，并继续复用表头排序、右键复制、导出 Excel 和双击跳转常规报告。检验者、审核者、审核时间和签收-审核时间差仅作为列表显示列，不作为筛选条件；主 SQL 只读取最近有效报告的 `OPER_CODE / REP_OPER`，人员字典由独立只读查询按连接缓存并在 C++ 中映射，缺失时回退人员代码，避免大结果集查询对 `JC_EMPLOYEE_PROPERTY` 执行带转换的重复关联；审核时间取该报告的 `LS_AS_REPORT.REP_TIME`，时间差由后台查询线程使用无时区公历算术计算到秒，并按相同签收/审核时间组合缓存，不写入 SQL。
+
+ListView 单元格复制菜单统一使用公共预览规则：右键显示可点击的 `复制：实际内容` 菜单；空值显示为 `（空白）`，换行和制表符在菜单中转为空格，超过 48 个字符时仅缩短菜单预览，剪贴板仍写入完整原值。当前已用于已签收条码查询、门诊查询和免疫重复项目统计；不使用鼠标悬停自动弹出，避免干扰列表浏览和选择。
+
+同一非空条形码对应多条医嘱时，结果列表将这些 `BarcodeQueryRow` 连续成组。每组第一行正常显示样本号、急诊、条形码、病人号、类型、姓名、性别和申请科室，后续行仅在 ListView 展示层将这 8 列留空，内存数据保持完整；空条形码不参与分组。Excel 工作簿继续导出每行完整字段。
+
+结果列表不再保留首个空白占位列，从“样本号”开始显示业务列；“审核时间”和“签收-审核时间差”位于“审核者”之后，“上机状态”位于时间差之后、“费用”之前。所有表头均支持本地升降序排序，只重排当前已加载的内存数据，不重新访问数据库；费用和时间差按数值比较，其余列按文本比较。排序完成后按条形码重新归组：条码组顺序取该组在排序结果中首次出现的位置，组内医嘱顺序保留排序结果，因此每组第一行始终显示完整公共字段。排序前会记录当前选中行，重绘后再恢复选中并滚动到可见位置。页面不再提供独立排序下拉框；用户点过表头后，后续查询结果会继续按当前表头排序和归组展示。结果列表支持右键复制任意业务单元格，菜单文字为 `复制：实际内容`；菜单预览将换行和制表符转为空格，超过 48 个字符时显示省略号，但写入剪贴板的仍是完整原值。
+
+结果列表双击行会复用常规报告的 `RegularReportOpenTarget + WM_REGULAR_OPEN_REPORT` 机制，携带同条码最近有效报告的 `REP_NO / OPER_NO / MACH_CODE / MACH_NAME / ROOM_CODE / CHK_DATE` 跳转到 `常规报告` 并定位目标报告；未匹配到有效报告、仪器或检验日期时不跳转并提示该条码为已签收未上机。
+
+`导出Excel` 按钮在当前列表有数据后启用，导出为标准 OOXML `.xlsx` 工作簿，默认文件名包含日期类型、查询日期范围和当前院区。导出内容使用当前内存列表顺序和所有可见业务列，包含审核时间及由 C++ 计算的签收-审核时间差，不重新访问 LIS。单元格统一使用 Unicode 内联字符串，避免 Excel 对 CSV 编码的自动猜测并保留前导零；首行冻结并启用自动筛选，超过 `1,048,575` 条数据时保留表头并自动拆分到多个工作表。
 
 ### 查询条件
 
@@ -228,16 +333,19 @@ HIV 统计表导出：
 | 条形码 | `LS_AS_BARCODE.BARCODE LIKE` |
 | 姓名 | `LS_AS_BARCODE.NAME LIKE` |
 | 病人号 | `LS_AS_BARCODE.REG_NO LIKE` |
-| 专业组 | `LS_AS_BARCODE.ROOM_CODE`，下拉来源 `LS_AS_ROOM` |
+| 院区 | `全部 / 老院 / 新院`；按 `LS_AS_BARCODE.DEPT_NAME` 是否包含“滨水”在 C++ 侧派生并过滤 |
+| 专业组 | 多选下拉来源 `LS_AS_ROOM` 的有效记录，仅加载 `Dept_Code IN (102,401)`；按院区显示两院、`102` 或 `401`，选择具体项时使用 `LS_AS_BARCODE.ROOM_CODE IN (...)` |
+| 上机状态 | 多选下拉；选择具体项时由报告链路派生状态后按所选状态组合过滤，选择 `全部` 时不追加上机状态条件 |
 | 未取消签收 | `LS_AS_BARCODE.CANCEL_DATE IS NULL` |
 | 取消签收 | `LS_AS_BARCODE.CANCEL_DATE IS NOT NULL` |
-| 已签收未上机 | `LS_AS_BARCODE.OPER_STATE = 0` |
-| 已上机未审核 | `LS_AS_BARCODE.OPER_STATE = 1` |
-| 审核完成 | `LS_AS_BARCODE.OPER_STATE = 2` |
-| 发送完成 | `LS_AS_BARCODE.OPER_STATE = 3` |
-| 已审核未发送 | 暂时空置，查询条件为 `1=0` |
+| 已签收未上机 | 未匹配到有效 `LS_AS_REPORT.REP_NO`，`LS_AS_REPORT.CHK_FLAG<>'T'`，`LS_AS_REPORT.CONF<>'S'`，且 `LS_AS_BARCODE.OPER_STATE=0` |
+| 已上机未审核 | 已匹配到有效 `LS_AS_REPORT.REP_NO` 或 `LS_AS_BARCODE.OPER_STATE>=1`，且 `LS_AS_REPORT.CHK_FLAG<>'T'`，`LS_AS_REPORT.CONF<>'S'` |
+| 已审核未发送 | `LS_AS_REPORT.CHK_FLAG='T'` 且 `LS_AS_REPORT.CONF<>'S'` |
+| 发送完成 | `LS_AS_REPORT.CONF='S'` |
 
-上机状态直接读取 `LS_AS_BARCODE.OPER_STATE`，不再通过 `LS_AS_REPORT` 的审核/发送字段推导。
+上机状态不再直接裸用 `LS_AS_BARCODE.OPER_STATE`。查询会按条码号聚合 `LS_AS_REPORT`，优先以报告链路校正状态：`CONF='S'` 优先显示发送完成；否则 `CHK_FLAG='T'` 显示已审核未发送；否则已存在有效报告号或 `OPER_STATE>=1` 显示已上机未审核；最后 `OPER_STATE=0` 显示已签收未上机。这样可以规避条码表 `OPER_STATE` 更新滞后造成的状态不准。
+
+`院区` 和 `专业组` 筛选控件依次位于第一行 `上机状态` 前。按钮区右侧状态图例使用横向小色块加文字展示 `已签收未上机 / 已上机未审核 / 已审核未发送 / 发送完成`，色块颜色与列表行背景色一致，便于和筛选结果直接对照。
 
 ### 列表字段
 
@@ -252,10 +360,14 @@ HIV 统计表导出：
 | 性别 | `LS_AS_BARCODE.SEX` |
 | 申请科室 | 优先 `LS_AS_BARCODE.DEPT_NAME`；需要从代码补全时，根据 `TYPE / TYPENAME` 区分门诊/住院后，用 `DEPT_CODE` 对应 `JC_dept_mz_zy.mzksid / zyksid` 取得 `mzksmc / zyksmc` |
 | 床号 | `LS_AS_BARCODE.BEDNO` |
-| 签收人 | `LS_AS_BARCODE.OPER_CODE` |
+| 签收人 | `LS_AS_BARCODE.OPER_CODE`，按签收人显示值/姓名处理，不等同于报告表人员代码 |
 | 签收时间 | `LS_AS_BARCODE.IN_DATE` |
 | 医嘱内容 | `LS_AS_BARCODE.ORDER_TEXT` |
 | 标本 | `LS_AS_BARCODE.SAMP_NAME` |
+| 检验者 | 最近有效报告 `LS_AS_REPORT.OPER_CODE = JC_EMPLOYEE_PROPERTY.EMPLOYEE_ID`，优先显示 `JC_EMPLOYEE_PROPERTY.NAME`，字典缺失时回退显示原值 |
+| 审核者 | 最近有效报告 `LS_AS_REPORT.REP_OPER = JC_EMPLOYEE_PROPERTY.EMPLOYEE_ID`，优先显示 `JC_EMPLOYEE_PROPERTY.NAME`，字典缺失时回退显示原值 |
+| 审核时间 | 最近有效报告 `LS_AS_REPORT.REP_TIME` |
+| 签收-审核时间差 | 后台 C++ 使用无时区公历算术计算 `REP_TIME - IN_DATE`，按相同时间组合缓存并显示到秒；缺少时间或结果为负时留空 |
 | 费用 | `LS_AS_BARCODE.FY` |
 | 申请医生 | `LS_AS_BARCODE.REQ_DRN` |
 | 状态 | `LS_AS_BARCODE.ZT_FLAG` |
@@ -267,7 +379,7 @@ HIV 统计表导出：
 | 取消时间 | `LS_AS_BARCODE.CANCEL_DATE` |
 | 取消人 | `LS_AS_BARCODE.CANCEL_OPER` |
 | HZID | `LS_AS_BARCODE.HZID` |
-| 上机状态 | `LS_AS_BARCODE.OPER_STATE`，列表显示 `0=未上机`、`1=已上机`、`2=审核完成`、`3=发送完成`；筛选下拉仍保留 `已审核未发送`，但该项暂时不关联实际状态 |
+| 上机状态 | 报告链路优先派生状态，显示 `已签收未上机 / 已上机未审核 / 已审核未发送 / 发送完成` |
 
 列表不合并同一条形码的多条记录，保持 `LS_AS_BARCODE` 查询结果一行对应一行，避免因聚合造成现场查询变慢。
 
@@ -316,7 +428,11 @@ HIV 统计表导出：
 
 ## 常规报告
 
-工具菜单中的 `常规报告` 以三栏工作台形式复用检验结果查询的数据链路。页面打开时不自动查询；用户先选择左侧 `检验仪器`，再按左侧 `检验日期` 查询当天该仪器下的报告主记录。
+自定义工具栏中的 `常规报告` 以三栏工作台形式复用检验结果查询的数据链路。页面打开时不自动查询；用户先选择左侧 `检验仪器`，再按左侧 `检验日期` 查询当天该仪器下的报告主记录。
+
+`检验结果查询` 页面同样复用通用报告查询链路，但该页面报告列表不展示医嘱内容，因此会通过 `skip_order_text` 跳过 `LS_AS_BARCODE.ORDER_TEXT` 的 `FOR XML PATH` 聚合；`常规报告` 仍展示医嘱内容，继续保留聚合逻辑。主查询、检验结果查询和常规报告的批量 ListView 填充会在 C++ 端用 `WM_SETREDRAW` 暂停重绘，完成所有行列更新后统一刷新；已签收条码查询改用 `LVS_OWNERDATA` 虚拟列表，仅登记结果总行数，并在控件请求可见单元格时返回文本。该模块始终保留全量查询记录，以独立行索引完成排序和条码归组；导出捕获当前索引顺序后在后台逐行写入 OOXML 工作表，因此界面虚拟化不会截断展示、排序或导出数据。现场 `186,431` 行验证结果为 `sort_ms=41`、`listview_ms=4`，数据库查询及取数为 `10,132 ms`，后续性能分析应继续将数据库阶段和界面阶段分开判断。
+
+已签收条码查询的异步反馈与数据生命周期绑定：查询开始时在列表中央加载卡片启动 `PBS_MARQUEE` 不确定进度，收到查询完成消息后统一停止；导出捕获全量显示索引后复用卡片并切换为确定进度条，每写入 `5,000` 行向 UI 线程报告一次进度，完成或失败均停止进度显示。结束处理先隐藏进度控件，再发送停止 Marquee 消息，最后隐藏说明文字与卡片并统一重绘父窗口，避免同级窗口逐个重绘时短暂显示空白卡片。成功信息保留在状态行，失败信息写入可点击查看详情的状态行 Alert；进度控件只由 UI 线程更新，后台线程仍只负责数据库读取或文件写入。
 
 ### 查询入口
 
@@ -389,7 +505,7 @@ HIV 统计表导出：
 - `打印条码`：打印当前右键行。
 - `打印勾选条码`：按当前列表顺序打印所有勾选行；如果中途失败，会停止后续打印并提示已发送数量和失败记录。
 
-打印会把对应行字段填入外部 `LabelPrint` 项目的 `MedicalLabelData`，再调用 `printMedicalLabel` 统一入口发送 RAW 打印任务。打印机名读取 `ClientConfig.ini` 的 `[RegularReport] BarcodePrinterName`，默认值为 `Xprinter XP-360B #2`，并以宽字符形式传给 LabelPrint，避免中文打印机名经过 ANSI 转换后失效。LabelPrint 内部会读取 Windows 打印机元数据，自动选择 XP-360B 的 TSPL 位图路径或 Zebra ZD888 的 ZPL 路径；无法识别时按 XP-360B 兼容路径兜底。打印数据中的样本号、条码号、姓名、标本、开单日期、科室代码、病人号来自右侧报告行；条码上的组合项目取自右侧报告行的 `检验仪器` 列内容，不再为了打印条码额外查询中间项目明细；开单日期按 `yyyy/M/d` 格式输出。
+打印会把对应行字段填入外部 `LabelPrint` 项目的 `MedicalLabelData`，再通过共享条码打印 helper 发送 RAW 打印任务。打印机名读取 `ClientConfig.ini` 的 `[RegularReport] BarcodePrinterName`，默认值为 `Xprinter XP-360B #2`，并以宽字符形式传给打印链路，避免中文打印机名经过 ANSI 转换后失效。非 Zebra 打印机继续交给 LabelPrint 读取 Windows 打印机元数据并自动选择 XP-360B TSPL、Godex EZPL 等路径；无法识别时按 XP-360B 兼容路径兜底。检测到 Zebra/ZD888t 时，本项目复用 LabelPrint Zebra 测试打印的默认布局，并读取 `[RegularReport] ZebraChineseFont` 选择 `E:SIMSUN.TTF` 或 `E:CSONG.TTF` 输出中文，默认 `E:SIMSUN.TTF`；仍清空 fallback，避免双字体叠印导致文字显示不全；Zebra 路径下 `组合项目` 以条码水平区域为基准居中。打印数据中的样本号、条码号、姓名、标本、开单日期、科室代码、病人号来自右侧报告行；条码上的组合项目取自右侧报告行的 `检验仪器` 列内容，不再为了打印条码额外查询中间项目明细；开单日期按 `yyyy/M/d` 格式输出。
 
 如果保存的打印机名因为 Windows 重命名、换电脑或驱动重装而失效，右键打印会提示失败原因和当前打印机名。用户需要到 `系统设置` 页重新选择常规报告条码打印机并保存。
 
@@ -451,3 +567,57 @@ HIV 统计表导出：
 2. 按截图增加行颜色规则和选中行效果。
 3. 导出当前报告列表为 CSV 或 Excel。
 4. 若要做到完全复刻，再继续反查原系统里项目名称、医生、科室等字典表。
+
+## 大量输血统计
+
+`统计分析管理 -> 大量输血统计` 提供“实际输血量”和“申请量对照”两种只读口径，正式默认“实际输血量”和“出库时间”。实际输血量以 `LS_XK_BloodCrossMatch.VerifyState='已审核'` 作为事实，并按唯一 `BloodInID` 计量；用户可主动切换申请量对照。
+
+申请量对照分支从页面开始日期 `00:00:00` 起读取，不向前回溯；结束条件读取到页面结束日期次日 `00:00:00 + 24小时`，用于补齐最后一天起始事件的完整窗口。只有事件第一张有效申请时间位于页面日期范围内的事件可进入结果，结束日期以后读取的申请只能补充已有事件，不能新建结果事件。
+
+主查询保留未审核、已审核、已完结和已驳回申请，排除 `Delete_Bit=1` 或状态为已删除的记录。C++ 按去空格后的 `Patient_NO` 分组，以页面范围内第一张有效申请为事件起点 `T0`，窗口使用左闭右开区间：
+
+```text
+T0 <= Apply_Time < T0 + 24小时
+```
+
+每张有效申请最多进入一个事件；当前窗口结束后，下一张有效申请建立新的独立事件。未审核、已审核和已完结申请参与事件和申请量统计；已驳回申请不建立事件、不贡献申请量，落入已有事件窗口时随事件成分展示，否则在独立已驳回核查视图展示；已删除申请不展示。
+
+申请量只读取子表 `CompositionBig_ID / ApplyComposition / ApplyNum / ApplyUnit`，按唯一子表 `ID` 去重。子表没有申请成分时不读取主表同名冗余字段回退，而是将事件标记为总量不完整。规则版本 `v4` 使用 `CompositionBig_ID` 作为唯一制品分类依据，名称仅用于展示：
+
+| 申请成分识别 | 原单位 | 毫升折算 |
+| --- | --- | ---: |
+| 已识别成分大类 | `ML` | `ApplyNum × 1` |
+| `CompositionBig_ID=3`（冷沉淀） | `U` | `ApplyNum × 20` |
+| 其他已识别成分大类 | `U` | `ApplyNum × 200` |
+| 已识别成分大类 | `治疗量` | `ApplyNum × 250` |
+
+页面提供默认不勾选的“包括血小板和冷沉淀”。不勾选时，`CompositionBig_ID=3/4` 的行保留在成分明细和 Excel 工作簿中，但不计入事件总量、计量制品项，也不因该行本身将事件标记为总量不完整；勾选后正常参与统计。`ApplyComposition` 不参与分类、旧数据兜底或异常名称匹配；类型 ID 缺失或未知时不计量并使事件总量不完整。Excel 工作簿同时记录类型 ID、开关状态和规则版本。
+
+查询参数携带阈值毫升数和比较方式，默认条件为 `>=1600ml`；阈值必须大于 `0` 且页面限制最多两位小数，比较方式可选 `>=` 或 `>`。已知折算量满足本次条件时事件命中大量输血；即使另有异常成分，只要已知量已经满足条件，事件仍命中并标记总量不完整。已知量未满足条件且存在无法折算或子表缺失时，事件进入折算异常结果，不能直接判定未命中。查询状态及两级 Excel 工作簿均记录实际统计条件。
+
+院区不下推 SQL，按事件首张有效申请的 `Apply_Dept` 在 C++ 内存派生：包含“滨水”为新院，其他为老院。事件列表、成分列表、汇总和 Excel 工作簿均基于院区过滤后的内存结果。事件和逐成分 Excel 工作簿不重新查询 LIS，双击事件或成分通过 `WM_BLOOD_OPEN_REQUEST` 定位对应输血申请。
+
+实际输血量查询链路为：
+
+```text
+四个时间字段分别按日期范围生成 CandidateIds
+    Match_Date       -> BloodCrossMatch.ID
+    Apply_Time       -> ApplyFormNO -> BloodCrossMatch.ID
+    Check_Date       -> ApplyFormNO -> BloodCrossMatch.ID
+    BloodOut_Date    -> BloodInID   -> BloodCrossMatch.ID
+              |
+              +-- UNION 去重
+              v
+CandidateCrossMatch
+    -> 只对候选 BloodInID 聚合 BloodOutInfo
+    -> 关联 RequestApply / BloodInfo / CompositionInfo
+    -> C++ 按所选时间和 COALESCE 优先级精确复核范围
+```
+
+查询不再使用跨表的 `selected_time OR (selected_time IS NULL AND COALESCE(...))` 条件。四个时间来源分别使用可直接下推的日期条件生成候选交叉配血 ID：用户选择的事件时间读取到结束日期后两天，用于补齐末日事件窗口；其余三个来源读取到结束日期次日，只用于覆盖所选时间缺失的异常候选。候选 ID 使用 `UNION` 去重后再关联业务表，并且 `BloodOutInfo` 只为候选 `BloodInID` 计算最早出库时间和记录数。
+
+SQL 候选集允许安全地适度多取；C++ 聚合入口会再次按原语义精确过滤：所选时间非空时使用所选时间范围，所选时间为空时按 `Match_Date -> BloodOut_Date -> Apply_Time -> Check_Date` 的优先级取第一个非空辅助时间。这样既保留缺失时间异常核查，又避免范围外记录污染血袋去重。申请表仍采用 `a.ApplyFormNO=cm.ApplyFormNO` 直接等值连接，去空格只用于返回后的显示和 C++ 分组。
+
+实际口径可选 `Match_Date / BloodOut_Date / Apply_Time / Check_Date` 作为事件时间，默认 `BloodOut_Date`。同一患者按所选时间升序，以第一袋为起点建立左闭右开的24小时窗口；所选时间为空时不回退，进入时间缺失核查。`BloodOutInfo` 多行时只取最早出库时间并标记核查，不能放大血袋数。实际制品分类只使用 `CompositionInfo.CompositionTypeID`：`1=红细胞、2=血浆、3=冷沉淀、4=血小板`；`Blood_Composition` 仅用于展示，因此 `CompositionTypeID=2` 的“去冷沉淀冰冻血浆”按血浆正常计量。事件的“实际输血制品构成”按实际血袋名称和折算量汇总，不读取申请子表成分；申请量对照分支才生成“申请制品构成”。事件姓名按事件时间顺序读取各血袋关联申请单的 `Patient_Name`，忽略空值并按首次出现顺序去重；主列表“姓名”显示最后出现的非空姓名，旁边“姓名数”显示唯一姓名数，逐袋明细保留各自原始姓名。患者归并仍只使用 `BloodCrossMatch.Patient_NO`，不读取身份证或住院患者表，不改变统计量和完整性。第二张列表上方按“最后姓名（其他姓名） | 病人号 | 折算量 | 袋数/项数”显示，没有其他姓名时省略括号。两张 ListView 默认使用简洁视图：事件表保留 9 个识别/判断字段，实际血袋明细保留 8 个核心字段，申请成分明细保留 7 个核心字段；勾选“完整视图”可即时恢复所有字段。Excel 始终导出完整列，不受显示模式影响。查询状态同时显示 SQL 返回原始记录数和总耗时。
+
+`VerifyState='未审核'`、未知状态、逻辑删除的交叉配血记录不进入正式统计而进入核查；申请单已删除、已驳回、缺失或病人号不一致不覆盖已审核的实际输血事实，血袋仍计量并标记申请单异常。实际容量及类型读取 `BloodInfo.CompositionID -> CompositionInfo.Norm + Unit + CompositionTypeID`，折算使用 `ML×1 / 普通U×200 / 类型3冷沉淀U×20 / 治疗量×250`。类型 ID 缺失或未知时不使用名称兜底，该项不计量并使事件总量不完整。事件 Excel 工作簿增加“姓名、事件内全部姓名、姓名数、是否多姓名”，血袋明细仍保留逐袋原始姓名；工作簿同时记录统计口径、事件时间口径、类型 ID、阈值、开关和异常状态。
