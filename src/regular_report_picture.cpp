@@ -13,9 +13,10 @@
 #include <algorithm>
 #include <cstring>
 #include <cwctype>
+#include <exception>
 #include <memory>
+#include <optional>
 #include <string>
-#include <thread>
 #include <vector>
 
 // ============================================================================
@@ -267,21 +268,45 @@ void startPicturePopupQuery(PicturePopupState* popup, const std::string& connect
     InvalidateRect(popup->hwnd, nullptr, FALSE);
     const HWND hwnd = popup->hwnd;
     const int generation = ++popup->generation;
-    std::thread([hwnd, connection, repNo, generation]() {
-        auto* result = new PicturePopupLoadResult;
-        result->generation = generation;
-        result->ok = search::query_report_picture(connection, repNo,
-                                                   result->picture, result->error);
-        if (!PostMessageW(hwnd, WM_POPUP_PICTURE_LOADED, 0,
-                          reinterpret_cast<LPARAM>(result))) {
-            delete result;
-        }
-    }).detach();
+    const bool queued = popup->pictureTask.start<PicturePopupLoadResult>(
+        [connection, repNo, generation] {
+            PicturePopupLoadResult result;
+            result.generation = generation;
+            result.ok = search::query_report_picture(
+                connection, repNo, result.picture, result.error);
+            return result;
+        },
+        [hwnd](std::optional<PicturePopupLoadResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<PicturePopupState*>(
+                GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (!state) return;
+            state->loading = false;
+            if (error || !result) {
+                releasePicturePopupImage(state);
+                state->status = L"图像后台任务异常";
+            } else if (!result->ok) {
+                releasePicturePopupImage(state);
+                state->status = L"图像查询失败：" + search::utf8_to_wide(result->error);
+            } else {
+                std::wstring loadError;
+                if (!loadPicturePopupImage(state, result->picture, loadError) &&
+                    !loadError.empty()) {
+                    state->status = loadError;
+                }
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        });
+    if (!queued) {
+        popup->loading = false;
+        popup->status = L"无法启动图像后台任务";
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
 }
 
 void clearPicturePopup(PicturePopupState* popup, const std::wstring& title,
                        const std::wstring& status) {
     if (!popup || !popup->hwnd) return;
+    popup->pictureTask.cancel();
     ++popup->generation;
     popup->repNo.clear();
     popup->loading = false;
@@ -378,29 +403,13 @@ LRESULT CALLBACK picturePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_EXITSIZEMOVE:
             savePicturePopupSize(hwnd);
             return 0;
-        case WM_POPUP_PICTURE_LOADED: {
-            std::unique_ptr<PicturePopupLoadResult> result(
-                reinterpret_cast<PicturePopupLoadResult*>(lp));
-            if (!popup || !result || result->generation != popup->generation) return 0;
-            popup->loading = false;
-            if (!result->ok) {
-                releasePicturePopupImage(popup);
-                popup->status = L"图像查询失败：" + search::utf8_to_wide(result->error);
-            } else {
-                std::wstring error;
-                if (!loadPicturePopupImage(popup, result->picture, error) && !error.empty()) {
-                    popup->status = error;
-                }
-            }
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
-        }
         case WM_CLOSE:
             savePicturePopupSize(hwnd);
             DestroyWindow(hwnd);
             return 0;
         case WM_NCDESTROY:
             if (popup) {
+                popup->pictureTask.cancel();
                 if (popup->owner && popup->owner->picturePopup == hwnd)
                     popup->owner->picturePopup = nullptr;
                 ++popup->generation;
@@ -718,6 +727,7 @@ void regularQuerySelectedPicture(RegularReportState* st, int selected) {
     if (selected < 0 || selected >= static_cast<int>(st->reportRows.size())) {
         if (st) {
             st->pictureQueryLoading = false;
+            st->pictureQueryTask.cancel();
             ++st->pictureQueryGeneration;
             st->pictureRepNo.clear();
             regularClearPictureView(st, L"");
@@ -727,6 +737,7 @@ void regularQuerySelectedPicture(RegularReportState* st, int selected) {
     const std::string repNo = st->reportRows[static_cast<size_t>(selected)].rep_no;
     if (search::trim(repNo).empty()) {
         st->pictureQueryLoading = false;
+        st->pictureQueryTask.cancel();
         ++st->pictureQueryGeneration;
         st->pictureRepNo.clear();
         regularClearPictureView(st, L"");
@@ -740,16 +751,30 @@ void regularQuerySelectedPicture(RegularReportState* st, int selected) {
     const int generation = ++st->pictureQueryGeneration;
     const HWND hwnd = st->hwnd;
     const std::string connection = st->reportConnectionString;
-    std::thread([hwnd, connection, repNo, generation]() {
-        auto* result = new PictureLoadResult;
-        result->generation = generation;
-        result->ok = search::query_report_picture(connection, repNo,
-                                                   result->picture, result->error);
-        if (!PostMessageW(hwnd, WM_REGULAR_PICTURE_LOADED, 0,
-                          reinterpret_cast<LPARAM>(result))) {
-            delete result;
-        }
-    }).detach();
+    const bool queued = st->pictureQueryTask.start<PictureLoadResult>(
+        [connection, repNo, generation] {
+            PictureLoadResult result;
+            result.generation = generation;
+            result.ok = search::query_report_picture(
+                connection, repNo, result.picture, result.error);
+            return result;
+        },
+        [hwnd](std::optional<PictureLoadResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<RegularReportState*>(
+                GetPropW(hwnd, REGULAR_REPORT_PROP_STATE));
+            if (!state) return;
+            if (error || !result) {
+                state->pictureQueryLoading = false;
+                regularClearPictureView(state, L"图像后台任务异常");
+                return;
+            }
+            finishPictureQuery(state, hwnd,
+                std::make_unique<PictureLoadResult>(std::move(*result)));
+        });
+    if (!queued) {
+        st->pictureQueryLoading = false;
+        regularClearPictureView(st, L"无法启动图像后台任务");
+    }
 }
 
 #endif

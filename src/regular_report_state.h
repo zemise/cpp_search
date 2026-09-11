@@ -5,6 +5,7 @@
 #include "module_registry.h"
 #include "search_app.h"
 #include "search_core.h"
+#include "window_task.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -25,10 +26,6 @@ constexpr const wchar_t* REGULAR_REPORT_PROP_STATE = L"RegularReportSt";
 constexpr const wchar_t* REGULAR_REPORT_PROP_DATE_FORMAT = L"RegularReportDateFormat";
 constexpr const wchar_t* REGULAR_REPORT_BLANK_DATE_FORMAT = L" ";
 
-constexpr UINT WM_REGULAR_REPORTS_LOADED = WM_APP + 171;
-constexpr UINT WM_REGULAR_RESULTS_LOADED = WM_APP + 172;
-constexpr UINT WM_REGULAR_PICTURE_LOADED = WM_APP + 173;
-constexpr UINT WM_POPUP_PICTURE_LOADED = WM_APP + 174;
 constexpr UINT_PTR IDT_REPORT_AUTO_REFRESH = 6310;
 constexpr UINT_PTR IDT_REPORT_INITIAL_QUICK_MACHINE = 6311;
 
@@ -241,6 +238,7 @@ struct PicturePopupState {
     ULONG_PTR gdiplusToken = 0;
     bool gdiplusReady = false;
     bool loading = false;
+    app::WindowTask pictureTask;
     int generation = 0;
     std::string repNo;
     std::wstring status;
@@ -328,6 +326,9 @@ struct RegularReportState {
     bool reportQueryLoading = false;
     bool resultQueryLoading = false;
     bool pictureQueryLoading = false;
+    app::WindowTask reportQueryTask;
+    app::WindowTask resultQueryTask;
+    app::WindowTask pictureQueryTask;
     bool autoRefreshTimerActive = false;
     bool initialQuickMachineTimerActive = false;
     bool skipInitialQuickMachineLoad = false;

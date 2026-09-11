@@ -31,9 +31,9 @@
 #include <exception>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -63,6 +63,10 @@ inline HWND makeDatePicker(HWND p, int x, int y, int w, int h,
 // Forward decls for functions defined later in this file
 void runReportQuery(RegularReportState* st, bool preserveState = false);
 void querySelectedResults(RegularReportState* st, int selected);
+void finishReportQuery(RegularReportState* st, HWND hwnd,
+                       std::unique_ptr<ReportLoadResult> result);
+void finishResultQuery(RegularReportState* st, HWND hwnd,
+                       std::unique_ptr<ResultLoadResult> result);
 void sortReportRowsByColumn(RegularReportState* st, int column);
 void populateLeftPanelFromReport(RegularReportState* st, int selected);
 void selectReportRow(RegularReportState* st, int index);
@@ -1598,6 +1602,10 @@ void runReportQuery(RegularReportState* st, bool preserveState) {
         return;
     }
     if (!preserveState) {
+        st->resultQueryTask.cancel();
+        ++st->resultQueryGeneration;
+        st->resultQueryLoading = false;
+        st->pictureQueryTask.cancel();
         ListView_DeleteAllItems(st->reportList);
         ListView_DeleteAllItems(st->resultList);
         st->reportRows.clear(); st->resultRows.clear();
@@ -1615,13 +1623,33 @@ void runReportQuery(RegularReportState* st, bool preserveState) {
     const std::string qd = input.start_date;
     const HWND hwnd = st->hwnd;
 
-    std::thread([hwnd, settings, input, gen, preserveState, qd]() {
-        auto* r = new ReportLoadResult;
-        r->generation = gen; r->preserveState = preserveState; r->queryDate = qd;
-        r->ok = search::run_report_query(settings, input, r->rows, r->connectionString, r->error);
-        if (!PostMessageW(hwnd, WM_REGULAR_REPORTS_LOADED, 0, reinterpret_cast<LPARAM>(r)))
-            delete r;
-    }).detach();
+    const bool queued = st->reportQueryTask.start<ReportLoadResult>(
+        [settings, input, gen, preserveState, qd] {
+            ReportLoadResult result;
+            result.generation = gen;
+            result.preserveState = preserveState;
+            result.queryDate = qd;
+            result.ok = search::run_report_query(
+                settings, input, result.rows, result.connectionString, result.error);
+            return result;
+        },
+        [hwnd](std::optional<ReportLoadResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<RegularReportState*>(
+                GetPropW(hwnd, REGULAR_REPORT_PROP_STATE));
+            if (!state) return;
+            if (error || !result) {
+                state->reportQueryLoading = false;
+                SetWindowTextW(state->status, L"样本列表后台任务异常");
+                LOG_ERROR("Regular report query task failed");
+                return;
+            }
+            finishReportQuery(state, hwnd,
+                std::make_unique<ReportLoadResult>(std::move(*result)));
+        });
+    if (!queued) {
+        st->reportQueryLoading = false;
+        SetWindowTextW(st->status, L"无法启动样本列表后台任务");
+    }
 }
 
 void runAutoRefreshQuery(RegularReportState* st) {
@@ -2127,7 +2155,10 @@ void querySelectedResults(RegularReportState* st, int sel) {
             populateLeftPanelFromReport(st, -1);
             st->resultRows.clear(); st->selectedReportIndex = -1;
             st->contextReportIndex = -1; st->resultQueryLoading = false;
+            st->resultQueryTask.cancel();
+            ++st->resultQueryGeneration;
             st->pictureQueryLoading = false; st->pictureRepNo.clear();
+            st->pictureQueryTask.cancel();
             ++st->pictureQueryGeneration;
             regularClearPictureView(st, L"");
         }
@@ -2135,6 +2166,7 @@ void querySelectedResults(RegularReportState* st, int sel) {
     }
     populateLeftPanelFromReport(st, sel);
     st->pictureQueryLoading = false; st->pictureRepNo.clear();
+    st->pictureQueryTask.cancel();
     ++st->pictureQueryGeneration;
     regularClearPictureView(st, L"");
     regularQuerySelectedPicture(st, sel);
@@ -2148,12 +2180,30 @@ void querySelectedResults(RegularReportState* st, int sel) {
     const HWND hwnd = st->hwnd;
     const std::string conn = st->reportConnectionString;
     const std::string repNo = st->reportRows[static_cast<size_t>(sel)].rep_no;
-    std::thread([hwnd, conn, repNo, gen]() {
-        auto* r = new ResultLoadResult; r->generation = gen;
-        r->ok = search::load_result_rows(conn, repNo, r->rows, r->error);
-        if (!PostMessageW(hwnd, WM_REGULAR_RESULTS_LOADED, 0, reinterpret_cast<LPARAM>(r)))
-            delete r;
-    }).detach();
+    const bool queued = st->resultQueryTask.start<ResultLoadResult>(
+        [conn, repNo, gen] {
+            ResultLoadResult result;
+            result.generation = gen;
+            result.ok = search::load_result_rows(conn, repNo, result.rows, result.error);
+            return result;
+        },
+        [hwnd](std::optional<ResultLoadResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<RegularReportState*>(
+                GetPropW(hwnd, REGULAR_REPORT_PROP_STATE));
+            if (!state) return;
+            if (error || !result) {
+                state->resultQueryLoading = false;
+                SetWindowTextW(state->status, L"项目明细后台任务异常");
+                LOG_ERROR("Regular report result task failed");
+                return;
+            }
+            finishResultQuery(state, hwnd,
+                std::make_unique<ResultLoadResult>(std::move(*result)));
+        });
+    if (!queued) {
+        st->resultQueryLoading = false;
+        SetWindowTextW(st->status, L"无法启动项目明细后台任务");
+    }
 }
 
 // ============================================================================
@@ -2558,12 +2608,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
 
-        case WM_REGULAR_REPORTS_LOADED:
-            if (st) finishReportQuery(st, hwnd,
-                std::unique_ptr<ReportLoadResult>(reinterpret_cast<ReportLoadResult*>(lp)));
-            else delete reinterpret_cast<ReportLoadResult*>(lp);
-            return 0;
-
         case WM_REGULAR_OPEN_REPORT: {
             if (st && st->initialQuickMachineTimerActive) {
                 KillTimer(hwnd, IDT_REPORT_INITIAL_QUICK_MACHINE);
@@ -2575,60 +2619,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (st && target) regularOpenReportTarget(st, *target);
             return 0;
         }
-
-        case WM_REGULAR_RESULTS_LOADED:
-            if (st) finishResultQuery(st, hwnd,
-                std::unique_ptr<ResultLoadResult>(reinterpret_cast<ResultLoadResult*>(lp)));
-            else delete reinterpret_cast<ResultLoadResult*>(lp);
-            return 0;
-
-        case WM_REGULAR_PICTURE_LOADED:
-            if (st) {
-                std::unique_ptr<PictureLoadResult> r(
-                    reinterpret_cast<PictureLoadResult*>(lp));
-                if (r && r->generation == st->pictureQueryGeneration) {
-                    st->pictureQueryLoading = false;
-                    if (!r->ok)
-                        regularClearPictureView(st,
-                            L"图像查询失败：" + search::utf8_to_wide(r->error));
-                    else {
-                        delete st->pictureImage; st->pictureImage = nullptr;
-                        if (st->pictureStream) { st->pictureStream->Release(); st->pictureStream = nullptr; }
-                        if (!r->picture.empty()) {
-                            if (!st->gdiplusReady) {
-                                Gdiplus::GdiplusStartupInput inp;
-                                st->gdiplusReady = Gdiplus::GdiplusStartup(
-                                    &st->gdiplusToken, &inp, nullptr) == Gdiplus::Ok;
-                            }
-                            if (st->gdiplusReady) {
-                                HGLOBAL m = GlobalAlloc(GMEM_MOVEABLE, r->picture.size());
-                                if (m) {
-                                    void* d = GlobalLock(m);
-                                    if (d) {
-                                        std::memcpy(d, r->picture.data(), r->picture.size());
-                                        GlobalUnlock(m);
-                                        if (CreateStreamOnHGlobal(m, TRUE, &st->pictureStream) == S_OK &&
-                                            st->pictureStream) {
-                                            st->pictureImage = Gdiplus::Image::FromStream(
-                                                st->pictureStream, FALSE);
-                                            if (!st->pictureImage ||
-                                                st->pictureImage->GetLastStatus() != Gdiplus::Ok) {
-                                                delete st->pictureImage; st->pictureImage = nullptr;
-                                                st->pictureStream->Release(); st->pictureStream = nullptr;
-                                            }
-                                        }
-                                    } else GlobalFree(m);
-                                }
-                            }
-                        }
-                        if (!st->pictureImage && !r->picture.empty())
-                            st->pictureStatus = L"图像解码失败";
-                        if (IsWindow(st->pictureView))
-                            InvalidateRect(st->pictureView, nullptr, TRUE);
-                    }
-                }
-            } else delete reinterpret_cast<PictureLoadResult*>(lp);
-            return 0;
 
         case WM_SIZE:
             if (st && st->pendingSplitterX > 0 && IsZoomed(hwnd)) {
@@ -2722,6 +2712,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY:
             RemovePropW(hwnd, REGULAR_REPORT_PROP_STATE);
             if (st) {
+                st->reportQueryTask.cancel();
+                st->resultQueryTask.cancel();
+                st->pictureQueryTask.cancel();
                 if (st->initialQuickMachineTimerActive) {
                     KillTimer(hwnd, IDT_REPORT_INITIAL_QUICK_MACHINE);
                     st->initialQuickMachineTimerActive = false;
