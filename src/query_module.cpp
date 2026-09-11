@@ -18,13 +18,15 @@
 #include "search_view_state.h"
 #include "regular_report_module.h"
 #include "trend_window.h"
+#include "window_task.h"
 #include <windows.h>
 #include <commctrl.h>
 
 #include <algorithm>
 #include <cstdlib>
+#include <exception>
 #include <memory>
-#include <thread>
+#include <optional>
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -58,8 +60,6 @@ constexpr int IDC_STATUS = 4001;
 constexpr const wchar_t* WND_CLASS   = L"QueryModuleChild";
 constexpr const wchar_t* PROP_STATE  = L"QuerySt";
 constexpr const wchar_t* WINDOW_TITLE = L"检验结果查询";
-constexpr UINT WM_QUERY_LOADED = WM_APP + 71;
-constexpr UINT WM_QUERY_RESULT_LOADED = WM_APP + 72;
 
 struct QueryState {
     ModuleContext ctx;
@@ -78,8 +78,8 @@ struct QueryState {
     int reportSortColumn = -1;
     bool reportSortAscending = true;
     bool queryLoading = false;
-    std::thread bgThread;
-    std::thread bgResultThread;
+    app::WindowTask queryTask;
+    app::WindowTask resultTask;
 };
 
 struct QueryLoadResult {
@@ -109,6 +109,9 @@ auto& machineOpts(QueryState* q)      { return q->viewState.machine_options; }
 auto& connStr(QueryState* q)          { return q->viewState.connection_string; }
 
 void querySelectedResults(QueryState* q, int selected);
+void finishRunQuery(QueryState* q, HWND hwnd, std::unique_ptr<QueryLoadResult> result);
+void finishQuerySelectedResults(QueryState* q, HWND hwnd,
+                                std::unique_ptr<ResultLoadResult> result);
 
 void setStatus(QueryState* q, const std::wstring& text) {
     search::set_status_text(q->ui, text);
@@ -254,24 +257,38 @@ void runQuery(QueryState* q) {
 
     q->queryLoading = true;
     const int generation = ++q->queryGeneration;
+    q->resultTask.cancel();
+    ++q->resultGeneration;
     const search::DbSettings settings = db(q);
     const HWND hwnd = GetParent(q->ui.reports);
     EnableWindow(q->ui.query_button, FALSE);
-    if (q->bgThread.joinable()) q->bgThread.join();
-    q->bgThread = std::thread([hwnd, settings, input, generation]() {
-        try {
-            auto* result = new QueryLoadResult;
-            result->generation = generation;
-            result->input = input;
-            result->ok = search::run_report_query(settings, input, result->rows, result->connection_string, result->error);
-            if (!PostMessageW(hwnd, WM_QUERY_LOADED, 0, reinterpret_cast<LPARAM>(result))) {
-                LOG_WARN("PostMessageW WM_QUERY_LOADED failed");
-                delete result;
+    const bool queued = q->queryTask.start<QueryLoadResult>(
+        [settings, input, generation] {
+            QueryLoadResult result;
+            result.generation = generation;
+            result.input = input;
+            result.ok = search::run_report_query(
+                settings, input, result.rows, result.connection_string, result.error);
+            return result;
+        },
+        [hwnd](std::optional<QueryLoadResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<QueryState*>(GetPropW(hwnd, PROP_STATE));
+            if (!state) return;
+            if (error || !result) {
+                state->queryLoading = false;
+                EnableWindow(state->ui.query_button, TRUE);
+                setStatus(state, L"查询失败：后台任务异常");
+                LOG_ERROR("Background query task failed");
+                return;
             }
-        } catch (...) {
-            LOG_ERROR("Background query thread crashed");
-        }
-    });
+            finishRunQuery(state, hwnd,
+                std::make_unique<QueryLoadResult>(std::move(*result)));
+        });
+    if (!queued) {
+        q->queryLoading = false;
+        EnableWindow(q->ui.query_button, TRUE);
+        setStatus(q, L"无法启动后台查询任务");
+    }
 }
 
 void finishRunQuery(QueryState* q, HWND hwnd, std::unique_ptr<QueryLoadResult> result) {
@@ -296,6 +313,8 @@ void finishRunQuery(QueryState* q, HWND hwnd, std::unique_ptr<QueryLoadResult> r
 void querySelectedResults(QueryState* q, int selected) {
     resultRows(q).clear();
     if (selected < 0 || selected >= static_cast<int>(reportRows(q).size())) {
+        q->resultTask.cancel();
+        ++q->resultGeneration;
         ListView_DeleteAllItems(q->ui.results);
         return;
     }
@@ -305,15 +324,26 @@ void querySelectedResults(QueryState* q, int selected) {
     const std::string connection = connStr(q);
     const std::string repNo = reportRows(q)[static_cast<size_t>(selected)].rep_no;
     const HWND hwnd = GetParent(q->ui.results);
-    if (q->bgResultThread.joinable()) q->bgResultThread.join();
-    q->bgResultThread = std::thread([hwnd, connection, repNo, generation]() {
-        auto* result = new ResultLoadResult;
-        result->generation = generation;
-        result->ok = search::load_result_rows(connection, repNo, result->rows, result->error);
-        if (!PostMessageW(hwnd, WM_QUERY_RESULT_LOADED, 0, reinterpret_cast<LPARAM>(result))) {
-            delete result;
-        }
-    });
+    const bool queued = q->resultTask.start<ResultLoadResult>(
+        [connection, repNo, generation] {
+            ResultLoadResult result;
+            result.generation = generation;
+            result.ok = search::load_result_rows(
+                connection, repNo, result.rows, result.error);
+            return result;
+        },
+        [hwnd](std::optional<ResultLoadResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<QueryState*>(GetPropW(hwnd, PROP_STATE));
+            if (!state) return;
+            if (error || !result) {
+                setStatus(state, L"项目明细后台任务异常");
+                LOG_ERROR("Background result task failed");
+                return;
+            }
+            finishQuerySelectedResults(state, hwnd,
+                std::make_unique<ResultLoadResult>(std::move(*result)));
+        });
+    if (!queued) setStatus(q, L"无法启动项目明细后台任务");
 }
 
 void finishQuerySelectedResults(QueryState* q, HWND hwnd, std::unique_ptr<ResultLoadResult> result) {
@@ -447,22 +477,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (search::handle_command(hwnd, wp, q->ids, handlers)) return 0;
             break;
         }
-        case WM_QUERY_LOADED:
-            if (q) {
-                std::unique_ptr<QueryLoadResult> result(reinterpret_cast<QueryLoadResult*>(lp));
-                finishRunQuery(q, hwnd, std::move(result));
-            } else {
-                delete reinterpret_cast<QueryLoadResult*>(lp);
-            }
-            return 0;
-        case WM_QUERY_RESULT_LOADED:
-            if (q) {
-                std::unique_ptr<ResultLoadResult> result(reinterpret_cast<ResultLoadResult*>(lp));
-                finishQuerySelectedResults(q, hwnd, std::move(result));
-            } else {
-                delete reinterpret_cast<ResultLoadResult*>(lp);
-            }
-            return 0;
         case WM_NOTIFY: {
             if (!q) break;
             search::NotifyEventHandlers handlers;
@@ -478,10 +492,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         }
         case WM_DESTROY: {
-            if (q->bgThread.joinable()) q->bgThread.join();
-            if (q->bgResultThread.joinable()) q->bgResultThread.join();
-            delete q;
             RemovePropW(hwnd, PROP_STATE);
+            if (q) {
+                q->queryTask.cancel();
+                q->resultTask.cancel();
+                delete q;
+            }
             break;
         }
     }
