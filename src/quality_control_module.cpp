@@ -3,6 +3,7 @@
 #ifdef _WIN32
 
 #include "main_app.h"
+#include "log.h"
 #include "machine_picker_popup.h"
 #include "quality_control_chart_renderer.h"
 #include "quality_control_store.h"
@@ -12,6 +13,7 @@
 #include "search_text.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "window_task.h"
 #include "xlsx_writer.h"
 
 #include <commctrl.h>
@@ -24,11 +26,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <exception>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -40,7 +43,6 @@ constexpr const wchar_t* IMPORT_WND_CLASS = L"QualityControlImportDialog";
 constexpr const wchar_t* WINDOW_TITLE = L"质控分析";
 constexpr const wchar_t* PROP_STATE = L"QualityControlSt";
 constexpr const wchar_t* PROP_CHART = L"QualityControlChartData";
-constexpr UINT WM_QC_QUERY_DONE = WM_APP + 0x681;
 
 enum ControlId {
     IDC_START_DATE = 6801,
@@ -159,6 +161,7 @@ struct State {
     HWND status = nullptr;
     HBRUSH bgBrush = nullptr;
     bool busy = false;
+    app::WindowTask queryTask;
     bool suppressSelectionNotify = false;
     bool detailsExpanded = false;
     int cardScrollY = 0;
@@ -2469,6 +2472,84 @@ void showMachinePicker(HWND hwnd, State* st) {
     search::show_machine_picker_popup(options);
 }
 
+void finishQualityControlQuery(HWND hwnd, State* st,
+                               std::unique_ptr<QueryDone> done) {
+    if (!st || !done) return;
+    st->busy = false;
+    EnableWindow(st->queryButton, TRUE);
+    EnableWindow(st->refreshButton, TRUE);
+    if (!done->ok) {
+        updateSidePanel(st);
+        updateExportButton(st);
+        updateChartButton(st);
+        setStatus(st, std::wstring(done->imported ? L"导入失败：" : L"查询失败：") +
+                          search::utf8_to_wide(done->error));
+        MessageBoxW(hwnd, search::utf8_to_wide(done->error).c_str(),
+                    WINDOW_TITLE, MB_ICONERROR);
+        return;
+    }
+    if (done->imported && !done->from_cache) {
+        std::wstring status = L"已导入质控（" + search::utf8_to_wide(done->import_start_date) +
+                              L" 至 " + search::utf8_to_wide(done->import_end_date) + L"）：导入 " +
+                              std::to_wstring(done->rows.size()) + L" 条；启用配置 " +
+                              std::to_wstring(done->config_count) + L" 条；耗时 " +
+                              std::to_wstring(done->elapsed_ms) +
+                              L" ms。当前页面日期和卡片结果未改变，点击“查询”可读取本地数据。";
+        if (done->config_count == 0) {
+            status = L"没有匹配的启用质控配置，请先在系统设置中维护仪器和固定样本号。";
+        } else if (done->rows.empty()) {
+            status += L"；所选导入范围内没有匹配 LIS 结果。";
+        }
+        setStatus(st, status);
+        updateSidePanel(st);
+        updateExportButton(st);
+        updateChartButton(st);
+        return;
+    }
+    st->rows = std::move(done->rows);
+    st->selectedGroup = -1;
+    st->selectedCard = -1;
+    buildGroups(st, false);
+    evaluateWestgardRules(st);
+    refreshVisibleResults(st);
+    int warningCount = 0;
+    int outOfControlCount = 0;
+    int evaluatedCount = 0;
+    for (const auto& row : st->rows) {
+        if (!row.qc_status.empty()) ++evaluatedCount;
+        if (row.qc_status == "warning") ++warningCount;
+        if (row.qc_status == "out_of_control") ++outOfControlCount;
+    }
+    std::wstring sourceText;
+    if (done->from_cache) {
+        sourceText = L"本地查询";
+        if (!done->cached_at.empty())
+            sourceText += L"（最近导入质控：" + search::utf8_to_wide(done->cached_at) + L"）";
+    } else {
+        sourceText = done->imported ? L"已导入质控" : L"LIS导入";
+        if (done->imported) {
+            sourceText += L"（" + search::utf8_to_wide(done->import_start_date) +
+                          L" 至 " + search::utf8_to_wide(done->import_end_date) + L"）";
+        }
+    }
+    std::wstring status = sourceText + L"：返回 " + std::to_wstring(st->rows.size()) +
+                          L" 条；启用配置 " + std::to_wstring(done->config_count) +
+                          L" 条；已判定 " + std::to_wstring(evaluatedCount) +
+                          L" 条；警告 " + std::to_wstring(warningCount) +
+                          L" 条；失控 " + std::to_wstring(outOfControlCount) +
+                          L" 条；耗时 " + std::to_wstring(done->elapsed_ms) + L" ms";
+    if (done->config_count == 0) {
+        status = L"没有匹配的启用质控配置，请先在系统设置中维护仪器和固定样本号。";
+    } else if (done->from_cache && st->rows.empty() && done->cached_at.empty()) {
+        status = L"本地查询暂无该范围质控数据，请先点击“导入质控”。";
+    } else if (st->rows.empty()) {
+        status += L"；当前日期范围内没有匹配 LIS 结果。";
+    }
+    setStatus(st, status);
+    updateExportButton(st);
+    updateChartButton(st);
+}
+
 void runQualityControlQuery(HWND hwnd, State* st, bool importFromLis, const qc::Query* importQuery = nullptr) {
     if (!st || st->busy) return;
     if (search::trim(st->selectedMachineCode).empty()) {
@@ -2485,20 +2566,47 @@ void runQualityControlQuery(HWND hwnd, State* st, bool importFromLis, const qc::
     setStatus(st, importFromLis ? L"正在导入质控数据..." : L"正在查询质控结果...");
     const qc::Query query = importQuery ? *importQuery : buildQuery(st);
     const ModuleContext ctx = st->ctx;
-    std::thread([hwnd, ctx, query, importFromLis]() {
-        auto* done = new QueryDone;
-        const auto started = std::chrono::steady_clock::now();
-        done->imported = importFromLis;
-        done->import_start_date = query.start_date;
-        done->import_end_date = query.end_date;
-        done->ok = queryLisRows(ctx, query, importFromLis, done->rows, done->config_count,
-                                done->from_cache, done->cached_at, done->error);
-        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::steady_clock::now() - started)
-                                 .count();
-        done->elapsed_ms = static_cast<int>(elapsed);
-        if (!PostMessageW(hwnd, WM_QC_QUERY_DONE, 0, reinterpret_cast<LPARAM>(done))) delete done;
-    }).detach();
+    const bool queued = st->queryTask.start<QueryDone>(
+        [ctx, query, importFromLis] {
+            QueryDone done;
+            const auto started = std::chrono::steady_clock::now();
+            done.imported = importFromLis;
+            done.import_start_date = query.start_date;
+            done.import_end_date = query.end_date;
+            done.ok = queryLisRows(ctx, query, importFromLis, done.rows, done.config_count,
+                                   done.from_cache, done.cached_at, done.error);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
+            done.elapsed_ms = static_cast<int>(elapsed);
+            return done;
+        },
+        [hwnd](std::optional<QueryDone> done, std::exception_ptr error) {
+            auto* state = reinterpret_cast<State*>(GetPropW(hwnd, PROP_STATE));
+            if (!state) return;
+            if (error || !done) {
+                state->busy = false;
+                EnableWindow(state->queryButton, TRUE);
+                EnableWindow(state->refreshButton, TRUE);
+                updateSidePanel(state);
+                updateExportButton(state);
+                updateChartButton(state);
+                setStatus(state, L"质控后台任务异常。");
+                LOG_ERROR("Quality control task failed");
+                return;
+            }
+            finishQualityControlQuery(hwnd, state,
+                std::make_unique<QueryDone>(std::move(*done)));
+        });
+    if (!queued) {
+        st->busy = false;
+        EnableWindow(st->queryButton, TRUE);
+        EnableWindow(st->refreshButton, TRUE);
+        updateSidePanel(st);
+        updateExportButton(st);
+        updateChartButton(st);
+        setStatus(st, L"无法启动质控后台任务。");
+    }
 }
 
 void openRegularReport(HWND hwnd, State* st, int visibleIndex) {
@@ -2671,80 +2779,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
         }
-        case WM_QC_QUERY_DONE: {
-            std::unique_ptr<QueryDone> done(reinterpret_cast<QueryDone*>(lp));
-            st->busy = false;
-            EnableWindow(st->queryButton, TRUE);
-            EnableWindow(st->refreshButton, TRUE);
-            if (!done->ok) {
-                updateSidePanel(st);
-                updateExportButton(st);
-                updateChartButton(st);
-                setStatus(st, std::wstring(done->imported ? L"导入失败：" : L"查询失败：") +
-                                  search::utf8_to_wide(done->error));
-                MessageBoxW(hwnd, search::utf8_to_wide(done->error).c_str(), WINDOW_TITLE, MB_ICONERROR);
-                return 0;
-            }
-            if (done->imported && !done->from_cache) {
-                std::wstring status = L"已导入质控（" + search::utf8_to_wide(done->import_start_date) +
-                                      L" 至 " + search::utf8_to_wide(done->import_end_date) + L"）：导入 " +
-                                      std::to_wstring(done->rows.size()) + L" 条；启用配置 " +
-                                      std::to_wstring(done->config_count) + L" 条；耗时 " +
-                                      std::to_wstring(done->elapsed_ms) + L" ms。当前页面日期和卡片结果未改变，点击“查询”可读取本地数据。";
-                if (done->config_count == 0) {
-                    status = L"没有匹配的启用质控配置，请先在系统设置中维护仪器和固定样本号。";
-                } else if (done->rows.empty()) {
-                    status += L"；所选导入范围内没有匹配 LIS 结果。";
-                }
-                setStatus(st, status);
-                updateSidePanel(st);
-                updateExportButton(st);
-                updateChartButton(st);
-                return 0;
-            }
-            st->rows = std::move(done->rows);
-            st->selectedGroup = -1;
-            st->selectedCard = -1;
-            buildGroups(st, false);
-            evaluateWestgardRules(st);
-            refreshVisibleResults(st);
-            int warningCount = 0;
-            int outOfControlCount = 0;
-            int evaluatedCount = 0;
-            for (const auto& row : st->rows) {
-                if (!row.qc_status.empty()) ++evaluatedCount;
-                if (row.qc_status == "warning") ++warningCount;
-                if (row.qc_status == "out_of_control") ++outOfControlCount;
-            }
-            std::wstring sourceText;
-            if (done->from_cache) {
-                sourceText = L"本地查询";
-                if (!done->cached_at.empty()) sourceText += L"（最近导入质控：" + search::utf8_to_wide(done->cached_at) + L"）";
-            } else {
-                sourceText = done->imported ? L"已导入质控" : L"LIS导入";
-                if (done->imported) {
-                    sourceText += L"（" + search::utf8_to_wide(done->import_start_date) +
-                                  L" 至 " + search::utf8_to_wide(done->import_end_date) + L"）";
-                }
-            }
-            std::wstring status = sourceText + L"：返回 " + std::to_wstring(st->rows.size()) +
-                                  L" 条；启用配置 " + std::to_wstring(done->config_count) +
-                                  L" 条；已判定 " + std::to_wstring(evaluatedCount) +
-                                  L" 条；警告 " + std::to_wstring(warningCount) +
-                                  L" 条；失控 " + std::to_wstring(outOfControlCount) +
-                                  L" 条；耗时 " + std::to_wstring(done->elapsed_ms) + L" ms";
-            if (done->config_count == 0) {
-                status = L"没有匹配的启用质控配置，请先在系统设置中维护仪器和固定样本号。";
-            } else if (done->from_cache && st->rows.empty() && done->cached_at.empty()) {
-                status = L"本地查询暂无该范围质控数据，请先点击“导入质控”。";
-            } else if (st->rows.empty()) {
-                status += L"；当前日期范围内没有匹配 LIS 结果。";
-            }
-            setStatus(st, status);
-            updateExportButton(st);
-            updateChartButton(st);
-            return 0;
-        }
         case app::WM_APP_SETTINGS_CHANGED:
         case app::WM_APP_FONT_CHANGED:
             if (msg == app::WM_APP_FONT_CHANGED && lp) st->ctx.uiFont = reinterpret_cast<HFONT>(lp);
@@ -2762,6 +2796,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DESTROY:
             if (st) {
+                st->queryTask.cancel();
                 if (st->bgBrush) DeleteObject(st->bgBrush);
                 RemovePropW(hwnd, PROP_STATE);
                 delete st;

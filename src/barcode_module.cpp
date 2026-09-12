@@ -10,6 +10,7 @@
 #include "search_text.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "window_task.h"
 #include "xlsx_writer.h"
 
 #include <commctrl.h>
@@ -19,7 +20,6 @@
 #include <windowsx.h>
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cstdlib>
@@ -27,8 +27,8 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -39,9 +39,6 @@ constexpr const wchar_t* LEGEND_CLASS = L"BarcodeStatusLegend";
 constexpr const wchar_t* CHECK_DROPDOWN_CLASS = L"BarcodeCheckDropdown";
 constexpr const wchar_t* WINDOW_TITLE = L"已签收条码查询";
 constexpr const wchar_t* PROP_STATE = L"BarcodeSt";
-constexpr UINT WM_BARCODE_LOADED = WM_APP + 501;
-constexpr UINT WM_BARCODE_EXPORTED = WM_APP + 502;
-constexpr UINT WM_BARCODE_EXPORT_PROGRESS = WM_APP + 503;
 
 constexpr int IDC_DATE_FIELD = 4101;
 constexpr int IDC_START_DATE = 4102;
@@ -120,9 +117,8 @@ struct BarcodeState {
     bool statusDropdownOpen = false;
     int listSortColumn = -1;
     bool listSortAscending = true;
-    std::thread bgThread;
-    std::thread exportThread;
-    std::atomic_bool cancelExport{false};
+    app::WindowTask queryTask;
+    app::WindowTask exportTask;
     bool querying = false;
     bool exporting = false;
     bool statusIsAlert = false;
@@ -143,6 +139,9 @@ struct BarcodeExportResult {
     size_t rowCount = 0;
     long long elapsedMs = 0;
 };
+
+void finishQuery(HWND hwnd, BarcodeState* st,
+                 std::unique_ptr<BarcodeQueryResult> result);
 
 struct ListColumn {
     int index;
@@ -1430,12 +1429,11 @@ void runQuery(HWND hwnd, BarcodeState* st) {
     setStatus(st, L"正在查询...");
     showQueryActivity(hwnd, st);
 
-    if (st->bgThread.joinable()) st->bgThread.join();
-    st->bgThread = std::thread([hwnd, filters]() {
-        try {
-            auto* result = new BarcodeQueryResult;
-            result->ok = search::query_barcodes(
-                filters, result->rows, result->error,
+    const bool queued = st->queryTask.start<BarcodeQueryResult>(
+        [filters] {
+            BarcodeQueryResult result;
+            result.ok = search::query_barcodes(
+                filters, result.rows, result.error,
                 [](const std::string& message) {
                     if (message.rfind("barcode query timing:", 0) == 0) {
                         LOG_DEBUG(message);
@@ -1443,24 +1441,28 @@ void runQuery(HWND hwnd, BarcodeState* st) {
                         LOG_WARN(message);
                     }
                 });
-            if (!PostMessageW(hwnd, WM_BARCODE_LOADED, 0, reinterpret_cast<LPARAM>(result))) {
-                LOG_WARN("PostMessageW WM_BARCODE_LOADED failed");
-                delete result;
+            return result;
+        },
+        [hwnd](std::optional<BarcodeQueryResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<BarcodeState*>(GetPropW(hwnd, PROP_STATE));
+            if (!state) return;
+            if (error || !result) {
+                state->querying = false;
+                hideActivity(hwnd, state);
+                showAlert(state, L"查询失败：后台任务异常");
+                updateActionButtons(state);
+                LOG_ERROR("Barcode query task failed");
+                return;
             }
-        } catch (const std::exception& ex) {
-            auto* result = new BarcodeQueryResult;
-            result->error = std::string("Barcode query thread failed: ") + ex.what();
-            if (!PostMessageW(hwnd, WM_BARCODE_LOADED, 0, reinterpret_cast<LPARAM>(result))) {
-                delete result;
-            }
-        } catch (...) {
-            auto* result = new BarcodeQueryResult;
-            result->error = "Barcode query thread failed unexpectedly.";
-            if (!PostMessageW(hwnd, WM_BARCODE_LOADED, 0, reinterpret_cast<LPARAM>(result))) {
-                delete result;
-            }
-        }
-    });
+            finishQuery(hwnd, state,
+                std::make_unique<BarcodeQueryResult>(std::move(*result)));
+        });
+    if (!queued) {
+        st->querying = false;
+        hideActivity(hwnd, st);
+        showAlert(st, L"无法启动后台查询任务。");
+        updateActionButtons(st);
+    }
 }
 
 void finishQuery(HWND hwnd, BarcodeState* st, std::unique_ptr<BarcodeQueryResult> result) {
@@ -1501,93 +1503,130 @@ void exportRowsXlsx(HWND hwnd, BarcodeState* st) {
     std::wstring path;
     if (!chooseExportPath(hwnd, st, path)) return;
 
-    if (st->exportThread.joinable()) st->exportThread.join();
     st->exporting = true;
-    st->cancelExport.store(false);
     updateActionButtons(st);
     setStatus(st, L"正在导出全部 " + std::to_wstring(st->displayOrder.size()) + L" 条记录...");
     showExportActivity(hwnd, st, st->displayOrder.size());
 
     const std::vector<size_t> exportOrder = st->displayOrder;
-    st->exportThread = std::thread([hwnd, st, path, exportOrder]() {
-        const auto started = std::chrono::steady_clock::now();
-        auto* result = new BarcodeExportResult;
-        result->path = path;
-        const std::wstring temporaryPath = path + L".lis-export.tmp";
-        DeleteFileW(temporaryPath.c_str());
+    const std::vector<search::BarcodeQueryRow> exportRows = st->rows;
+    const bool queued = st->exportTask.start<BarcodeExportResult>(
+        [hwnd, path, exportOrder, exportRows](app::WindowTaskContext task) {
+            const auto started = std::chrono::steady_clock::now();
+            BarcodeExportResult result;
+            result.path = path;
+            const std::wstring temporaryPath = path + L".lis-export.tmp";
+            DeleteFileW(temporaryPath.c_str());
 
-        FILE* file = nullptr;
-        try {
+            FILE* file = nullptr;
+            try {
 #ifdef _MSC_VER
-            _wfopen_s(&file, temporaryPath.c_str(), L"wb");
+                _wfopen_s(&file, temporaryPath.c_str(), L"wb");
 #else
-            file = _wfopen(temporaryPath.c_str(), L"wb");
+                file = _wfopen(temporaryPath.c_str(), L"wb");
 #endif
-            bool writeOk = file != nullptr;
-            if (!file) {
-                result->error = L"导出文件创建失败，请确认目标位置可写。";
-            } else {
-                std::vector<std::string> headers;
-                headers.reserve(sizeof(BARCODE_COLUMNS) / sizeof(BARCODE_COLUMNS[0]));
-                for (const auto& column : BARCODE_COLUMNS) {
-                    if (column.index < FIRST_DATA_COLUMN || column.index > LAST_DATA_COLUMN) continue;
-                    headers.push_back(search::wide_to_utf8(column.title));
+                bool writeOk = file != nullptr;
+                if (!file) {
+                    result.error = L"导出文件创建失败，请确认目标位置可写。";
+                } else {
+                    std::vector<std::string> headers;
+                    headers.reserve(sizeof(BARCODE_COLUMNS) / sizeof(BARCODE_COLUMNS[0]));
+                    for (const auto& column : BARCODE_COLUMNS) {
+                        if (column.index < FIRST_DATA_COLUMN || column.index > LAST_DATA_COLUMN) continue;
+                        headers.push_back(search::wide_to_utf8(column.title));
+                    }
+                    std::string exportError;
+                    writeOk = search::write_xlsx(
+                        file, "已签收条码", headers, exportOrder.size(),
+                        [&exportRows, &exportOrder](size_t row, size_t column) -> std::string {
+                            if (row >= exportOrder.size()) return {};
+                            const size_t rowIndex = exportOrder[row];
+                            if (rowIndex >= exportRows.size()) return {};
+                            return barcodeSortValue(exportRows[rowIndex],
+                                                    static_cast<int>(column) + FIRST_DATA_COLUMN);
+                        },
+                        [task]() { return task.cancelled(); },
+                        [task, hwnd](size_t completed, size_t total) {
+                            task.post([hwnd, completed, total] {
+                                auto* state = reinterpret_cast<BarcodeState*>(
+                                    GetPropW(hwnd, PROP_STATE));
+                                if (!state || !state->exporting) return;
+                                if (state->progress) {
+                                    SendMessageW(state->progress, PBM_SETPOS,
+                                        static_cast<WPARAM>((std::min)(
+                                            completed, static_cast<size_t>(INT_MAX))), 0);
+                                }
+                                setStatus(state, L"正在导出全部记录：" +
+                                    std::to_wstring(completed) + L" / " +
+                                    std::to_wstring(total) + L"...");
+                            });
+                        },
+                        result.rowCount, result.canceled, exportError);
+                    if (fclose(file) != 0 && writeOk) {
+                        writeOk = false;
+                        exportError = "failed to flush XLSX file";
+                    }
+                    file = nullptr;
+                    if (!writeOk && !result.canceled) {
+                        result.error = L"生成 Excel 工作簿失败：" +
+                                       search::utf8_to_wide(exportError);
+                    }
                 }
-                std::string exportError;
-                writeOk = search::write_xlsx(
-                    file, "已签收条码", headers, exportOrder.size(),
-                    [st, &exportOrder](size_t row, size_t column) -> std::string {
-                        if (row >= exportOrder.size()) return {};
-                        const size_t rowIndex = exportOrder[row];
-                        if (rowIndex >= st->rows.size()) return {};
-                        return barcodeSortValue(st->rows[rowIndex],
-                                                static_cast<int>(column) + FIRST_DATA_COLUMN);
-                    },
-                    [st]() { return st->cancelExport.load(); },
-                    [hwnd](size_t completed, size_t total) {
-                        PostMessageW(hwnd, WM_BARCODE_EXPORT_PROGRESS,
-                                     static_cast<WPARAM>(completed),
-                                     static_cast<LPARAM>(total));
-                    },
-                    result->rowCount, result->canceled, exportError);
-                if (fclose(file) != 0 && writeOk) {
-                    writeOk = false;
-                    exportError = "failed to flush XLSX file";
-                }
-                file = nullptr;
-                if (!writeOk && !result->canceled) {
-                    result->error = L"生成 Excel 工作簿失败：" +
-                                    search::utf8_to_wide(exportError);
-                }
-            }
 
-            if (result->canceled) {
+                if (result.canceled) {
+                    DeleteFileW(temporaryPath.c_str());
+                } else if (!writeOk) {
+                    DeleteFileW(temporaryPath.c_str());
+                    if (result.error.empty()) result.error = L"写入导出文件失败。";
+                } else if (!MoveFileExW(temporaryPath.c_str(), path.c_str(),
+                                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                    DeleteFileW(temporaryPath.c_str());
+                    result.error = L"导出文件保存失败。";
+                } else {
+                    result.ok = true;
+                }
+            } catch (const std::exception& ex) {
+                if (file) fclose(file);
                 DeleteFileW(temporaryPath.c_str());
-            } else if (!writeOk) {
+                result.error = L"导出失败：" + search::utf8_to_wide(ex.what());
+            } catch (...) {
+                if (file) fclose(file);
                 DeleteFileW(temporaryPath.c_str());
-                if (result->error.empty()) result->error = L"写入导出文件失败。";
-            } else if (!MoveFileExW(temporaryPath.c_str(), path.c_str(),
-                                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-                DeleteFileW(temporaryPath.c_str());
-                result->error = L"导出文件保存失败。";
-            } else {
-                result->ok = true;
+                result.error = L"导出过程中发生未知错误。";
             }
-        } catch (const std::exception& ex) {
-            if (file) fclose(file);
-            DeleteFileW(temporaryPath.c_str());
-            result->error = L"导出失败：" + search::utf8_to_wide(ex.what());
-        } catch (...) {
-            if (file) fclose(file);
-            DeleteFileW(temporaryPath.c_str());
-            result->error = L"导出过程中发生未知错误。";
-        }
-        result->elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - started).count();
-        if (!PostMessageW(hwnd, WM_BARCODE_EXPORTED, 0, reinterpret_cast<LPARAM>(result))) {
-            delete result;
-        }
-    });
+            result.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            return result;
+        },
+        [hwnd](std::optional<BarcodeExportResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<BarcodeState*>(GetPropW(hwnd, PROP_STATE));
+            if (!state) return;
+            state->exporting = false;
+            hideActivity(hwnd, state);
+            updateActionButtons(state);
+            if (error || !result) {
+                showAlert(state, L"导出过程中发生后台任务异常。");
+                LOG_ERROR("Barcode export task failed");
+                return;
+            }
+            LOG_DEBUG("barcode export timing: elapsed_ms=" +
+                      std::to_string(result->elapsedMs) + ", rows=" +
+                      std::to_string(result->rowCount));
+            if (result->canceled) {
+                setStatus(state, L"导出已取消。");
+            } else if (!result->ok) {
+                showAlert(state, L"导出失败：" + result->error);
+            } else {
+                setStatus(state, L"已导出全部 " + std::to_wstring(result->rowCount) +
+                                  L" 条记录：" + result->path);
+            }
+        });
+    if (!queued) {
+        st->exporting = false;
+        hideActivity(hwnd, st);
+        updateActionButtons(st);
+        showAlert(st, L"无法启动导出后台任务。");
+    }
 }
 
 COLORREF rowColor(const search::BarcodeQueryRow& row) {
@@ -1666,46 +1705,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
             }
             break;
-        case WM_BARCODE_LOADED:
-            if (st) {
-                std::unique_ptr<BarcodeQueryResult> result(reinterpret_cast<BarcodeQueryResult*>(lp));
-                finishQuery(hwnd, st, std::move(result));
-            } else {
-                delete reinterpret_cast<BarcodeQueryResult*>(lp);
-            }
-            return 0;
-        case WM_BARCODE_EXPORT_PROGRESS:
-            if (st && st->exporting) {
-                if (st->progress) {
-                    SendMessageW(st->progress, PBM_SETPOS,
-                                 static_cast<WPARAM>((std::min)(
-                                     static_cast<size_t>(wp), static_cast<size_t>(INT_MAX))), 0);
-                }
-                setStatus(st, L"正在导出全部记录：" + std::to_wstring(static_cast<size_t>(wp)) +
-                              L" / " + std::to_wstring(static_cast<size_t>(lp)) + L"...");
-            }
-            return 0;
-        case WM_BARCODE_EXPORTED:
-            if (st) {
-                std::unique_ptr<BarcodeExportResult> result(reinterpret_cast<BarcodeExportResult*>(lp));
-                if (st->exportThread.joinable()) st->exportThread.join();
-                st->exporting = false;
-                hideActivity(hwnd, st);
-                updateActionButtons(st);
-                LOG_DEBUG("barcode export timing: elapsed_ms=" + std::to_string(result->elapsedMs) +
-                          ", rows=" + std::to_string(result->rowCount));
-                if (result->canceled) {
-                    setStatus(st, L"导出已取消。");
-                } else if (!result->ok) {
-                    showAlert(st, L"导出失败：" + result->error);
-                } else {
-                    setStatus(st, L"已导出全部 " + std::to_wstring(result->rowCount) +
-                                  L" 条记录：" + result->path);
-                }
-            } else {
-                delete reinterpret_cast<BarcodeExportResult*>(lp);
-            }
-            return 0;
         case WM_NOTIFY:
             if (st) {
                 auto* nm = reinterpret_cast<NMHDR*>(lp);
@@ -1768,9 +1767,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY:
             RemovePropW(hwnd, PROP_STATE);
             if (st) {
-                st->cancelExport.store(true);
-                if (st->bgThread.joinable()) st->bgThread.join();
-                if (st->exportThread.joinable()) st->exportThread.join();
+                st->queryTask.cancel();
+                st->exportTask.cancel();
                 if (st->bgBrush) DeleteObject(st->bgBrush);
                 if (st->alertBrush) DeleteObject(st->alertBrush);
                 if (st->activityBrush) DeleteObject(st->activityBrush);

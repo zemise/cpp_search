@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <type_traits>
@@ -33,9 +34,42 @@ public:
     virtual void execute() noexcept = 0;
 };
 
+template <typename Result, typename Worker, typename Handler>
+class WorkModel;
+
 bool queue(std::unique_ptr<Work> work) noexcept;
 HWND dispatcher() noexcept;
 bool post(HWND dispatcherWindow, std::unique_ptr<Completion> completion) noexcept;
+bool postCallback(std::weak_ptr<State> state,
+                  std::uint64_t generation,
+                  HWND dispatcherWindow,
+                  std::function<void()> callback) noexcept;
+
+}  // namespace window_task_detail
+
+// A copyable worker-side view of one task generation. It never owns the page.
+class WindowTaskContext {
+public:
+    bool cancelled() const noexcept;
+    bool post(std::function<void()> callback) const noexcept;
+
+private:
+    template <typename Result, typename Worker, typename Handler>
+    friend class window_task_detail::WorkModel;
+
+    WindowTaskContext(std::weak_ptr<window_task_detail::State> state,
+                      std::uint64_t generation,
+                      HWND dispatcherWindow) noexcept
+        : state_(std::move(state)),
+          generation_(generation),
+          dispatcherWindow_(dispatcherWindow) {}
+
+    std::weak_ptr<window_task_detail::State> state_;
+    std::uint64_t generation_ = 0;
+    HWND dispatcherWindow_ = nullptr;
+};
+
+namespace window_task_detail {
 
 template <typename Result, typename Handler>
 class CompletionModel final : public Completion {
@@ -92,7 +126,12 @@ public:
         std::optional<Result> result;
         std::exception_ptr error;
         try {
-            result.emplace(worker_());
+            if constexpr (std::is_invocable_v<Worker, WindowTaskContext>) {
+                result.emplace(worker_(WindowTaskContext(
+                    state_, generation_, dispatcherWindow_)));
+            } else {
+                result.emplace(worker_());
+            }
         } catch (...) {
             error = std::current_exception();
         }
