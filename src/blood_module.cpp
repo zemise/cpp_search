@@ -12,16 +12,18 @@
 #include "search_ui_columns.h"
 #include "search_ui_layout.h"
 #include "win32_control_id.h"
+#include "window_task.h"
 
 #include <algorithm>
 #include <commctrl.h>
 #include <cstdio>
 #include <cwchar>
 #include <cwctype>
+#include <exception>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
-#include <thread>
 #include <vector>
 #include <windows.h>
 
@@ -58,9 +60,6 @@ constexpr const wchar_t* PROP_STATE = L"BloodSt";
 constexpr const wchar_t* PROP_LIS_STATE = L"BloodLisSt";
 constexpr const wchar_t* WINDOW_TITLE = L"输血结果查询";
 constexpr UINT WM_BLOOD_AUTO_QUERY = WM_APP + 61;
-constexpr UINT WM_LIS_QUERY_DONE = WM_APP + 62;
-constexpr UINT WM_LIS_RESULTS_DONE = WM_APP + 63;
-constexpr UINT WM_LIS_SUMMARY_DONE = WM_APP + 64;
 constexpr UINT_PTR SEARCH_EDIT_SUBCLASS = 6201;
 constexpr int DEFAULT_DATE_RANGE_DAYS = 7;
 constexpr int DEFAULT_LIS_DAYS = 14;
@@ -231,6 +230,9 @@ struct LisState {
     bool suppressReportSelection = false;
     int queryGeneration = 0;
     int resultGeneration = 0;
+    app::WindowTask queryTask;
+    app::WindowTask summaryTask;
+    app::WindowTask resultTask;
     // Cached LIS summary settings loaded once for this popup.
     std::string lis_abo_codes;
     std::string lis_rhd_codes;
@@ -273,6 +275,10 @@ struct LisResultsResult {
     std::vector<search::ResultRow> rows;
     std::string error;
 };
+
+void finishLisQuery(HWND hwnd, LisState* st, std::unique_ptr<LisQueryResult> result);
+void finishLisSummary(HWND hwnd, LisState* st, std::unique_ptr<LisSummaryResult> result);
+void finishLisResults(HWND hwnd, LisState* st, std::unique_ptr<LisResultsResult> result);
 
 RECT workAreaForWindow(HWND hwnd) {
     RECT fallback{};
@@ -1518,6 +1524,8 @@ void queryLisResults(LisState* st, int reportIndex) {
     st->result_rows.clear();
     ListView_DeleteAllItems(st->results);
     if (reportIndex < 0 || reportIndex >= static_cast<int>(st->report_rows.size())) {
+        st->resultTask.cancel();
+        ++st->resultGeneration;
         return;
     }
 
@@ -1526,15 +1534,26 @@ void queryLisResults(LisState* st, int reportIndex) {
     const std::string conn = lisConnectionString(st);
     const std::string repNo = st->report_rows[static_cast<size_t>(reportIndex)].rep_no;
 
-    std::thread([hwnd, conn, repNo, reportIndex, generation]() {
-        auto* result = new LisResultsResult;
-        result->generation = generation;
-        result->reportIndex = reportIndex;
-        result->ok = search::query_results(conn, repNo, result->rows, result->error);
-        if (!PostMessageW(hwnd, WM_LIS_RESULTS_DONE, 0, reinterpret_cast<LPARAM>(result))) {
-            delete result;
-        }
-    }).detach();
+    const bool queued = st->resultTask.start<LisResultsResult>(
+        [conn, repNo, reportIndex, generation] {
+            LisResultsResult result;
+            result.generation = generation;
+            result.reportIndex = reportIndex;
+            result.ok = search::query_results(conn, repNo, result.rows, result.error);
+            return result;
+        },
+        [hwnd](std::optional<LisResultsResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<LisState*>(GetPropW(hwnd, PROP_LIS_STATE));
+            if (!state) return;
+            if (error || !result) {
+                SetWindowTextW(state->status, L"项目明细后台任务异常。");
+                LOG_ERROR("Blood LIS result task failed");
+                return;
+            }
+            finishLisResults(hwnd, state,
+                std::make_unique<LisResultsResult>(std::move(*result)));
+        });
+    if (!queued) SetWindowTextW(st->status, L"无法启动项目明细后台任务。");
 }
 
 void selectLisReport(LisState* st, int index) {
@@ -1542,6 +1561,8 @@ void selectLisReport(LisState* st, int index) {
     ListView_SetItemState(st->reports, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
     if (index < 0 || index >= static_cast<int>(st->report_rows.size())) {
         st->suppressReportSelection = false;
+        st->resultTask.cancel();
+        ++st->resultGeneration;
         st->result_rows.clear();
         ListView_DeleteAllItems(st->results);
         return;
@@ -1652,6 +1673,8 @@ void runLisQuery(LisState* st, LisQueryMode mode = LisQueryMode::PatientNo) {
 
     st->report_rows.clear();
     st->result_rows.clear();
+    st->resultTask.cancel();
+    ++st->resultGeneration;
     ListView_DeleteAllItems(st->reports);
     ListView_DeleteAllItems(st->results);
     setLisSummaryLoading(st);
@@ -1675,26 +1698,67 @@ void runLisQuery(LisState* st, LisQueryMode mode = LisQueryMode::PatientNo) {
     const HWND hwnd = GetParent(st->reports);
     const int generation = ++st->queryGeneration;
     const size_t socialNoPatientCount = filters.patient_nos.size();
-    std::thread([hwnd, filters, mode, byName, phoneLookupAttempted, socialNoPatientCount, generation]() {
-        auto* result = new LisQueryResult;
-        result->generation = generation;
-        result->mode = mode;
-        result->phoneFiltered = byName && !search::trim(filters.patient_phone).empty();
-        result->phoneLookupAttempted = phoneLookupAttempted;
-        result->socialNoPatientCount = socialNoPatientCount;
-        result->ok = search::query_blood_lis_reports(filters, result->reports, result->error);
-        if (!PostMessageW(hwnd, WM_LIS_QUERY_DONE, 0, reinterpret_cast<LPARAM>(result))) {
-            delete result;
-        }
-    }).detach();
-    std::thread([hwnd, filters, generation]() {
-        auto* result = new LisSummaryResult;
-        result->generation = generation;
-        result->ok = search::query_lis_summary(filters, result->summary, result->error);
-        if (!PostMessageW(hwnd, WM_LIS_SUMMARY_DONE, 0, reinterpret_cast<LPARAM>(result))) {
-            delete result;
-        }
-    }).detach();
+    const bool queryQueued = st->queryTask.start<LisQueryResult>(
+        [filters, mode, byName, phoneLookupAttempted, socialNoPatientCount, generation] {
+            LisQueryResult result;
+            result.generation = generation;
+            result.mode = mode;
+            result.phoneFiltered = byName && !search::trim(filters.patient_phone).empty();
+            result.phoneLookupAttempted = phoneLookupAttempted;
+            result.socialNoPatientCount = socialNoPatientCount;
+            result.ok = search::query_blood_lis_reports(
+                filters, result.reports, result.error);
+            return result;
+        },
+        [hwnd](std::optional<LisQueryResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<LisState*>(GetPropW(hwnd, PROP_LIS_STATE));
+            if (!state) return;
+            if (error || !result) {
+                EnableWindow(state->queryButton, TRUE);
+                EnableWindow(state->queryNameButton, TRUE);
+                EnableWindow(state->queryIdButton, TRUE);
+                SetWindowTextW(state->status, L"检验结果后台任务异常。");
+                LOG_ERROR("Blood LIS query task failed");
+                return;
+            }
+            finishLisQuery(hwnd, state,
+                std::make_unique<LisQueryResult>(std::move(*result)));
+        });
+    const bool summaryQueued = st->summaryTask.start<LisSummaryResult>(
+        [filters, generation] {
+            LisSummaryResult result;
+            result.generation = generation;
+            result.ok = search::query_lis_summary(filters, result.summary, result.error);
+            return result;
+        },
+        [hwnd](std::optional<LisSummaryResult> result, std::exception_ptr error) {
+            auto* state = reinterpret_cast<LisState*>(GetPropW(hwnd, PROP_LIS_STATE));
+            if (!state) return;
+            if (error || !result) {
+                state->summaryBloodValue = L"血型：失败";
+                state->summaryCbcValue = L"血常规：失败";
+                state->summaryIrregularValue = L"不规则：失败";
+                state->summaryDirectAntiglobulinValue = L"直抗：失败";
+                invalidateLisSummary(hwnd, state);
+                LOG_ERROR("Blood LIS summary task failed");
+                return;
+            }
+            finishLisSummary(hwnd, state,
+                std::make_unique<LisSummaryResult>(std::move(*result)));
+        });
+    if (!queryQueued) {
+        EnableWindow(st->queryButton, TRUE);
+        EnableWindow(st->queryNameButton, TRUE);
+        EnableWindow(st->queryIdButton, TRUE);
+        SetWindowTextW(st->status, L"无法启动检验结果后台任务。");
+    }
+    if (!summaryQueued) {
+        st->summaryBloodValue = L"血型：失败";
+        st->summaryCbcValue = L"血常规：失败";
+        st->summaryIrregularValue = L"不规则：失败";
+        st->summaryDirectAntiglobulinValue = L"直抗：失败";
+        invalidateLisSummary(hwnd, st);
+    }
 }
 
 void finishLisQuery(HWND hwnd, LisState* st, std::unique_ptr<LisQueryResult> result) {
@@ -2012,30 +2076,6 @@ LRESULT CALLBACK lisWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             break;
-        case WM_LIS_QUERY_DONE:
-            if (st) {
-                std::unique_ptr<LisQueryResult> result(reinterpret_cast<LisQueryResult*>(lp));
-                finishLisQuery(hwnd, st, std::move(result));
-            } else {
-                delete reinterpret_cast<LisQueryResult*>(lp);
-            }
-            return 0;
-        case WM_LIS_SUMMARY_DONE:
-            if (st) {
-                std::unique_ptr<LisSummaryResult> result(reinterpret_cast<LisSummaryResult*>(lp));
-                finishLisSummary(hwnd, st, std::move(result));
-            } else {
-                delete reinterpret_cast<LisSummaryResult*>(lp);
-            }
-            return 0;
-        case WM_LIS_RESULTS_DONE:
-            if (st) {
-                std::unique_ptr<LisResultsResult> result(reinterpret_cast<LisResultsResult*>(lp));
-                finishLisResults(hwnd, st, std::move(result));
-            } else {
-                delete reinterpret_cast<LisResultsResult*>(lp);
-            }
-            return 0;
         case WM_NOTIFY: {
             if (!st) break;
             auto* nm = reinterpret_cast<NMHDR*>(lp);
@@ -2120,6 +2160,11 @@ LRESULT CALLBACK lisWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_DESTROY:
             RemovePropW(hwnd, PROP_LIS_STATE);
+            if (st) {
+                st->queryTask.cancel();
+                st->summaryTask.cancel();
+                st->resultTask.cancel();
+            }
             if (st && st->bgBrush) DeleteObject(st->bgBrush);
             if (st && st->summaryFont) DeleteObject(st->summaryFont);
             if (st && st->summaryBoldFont) DeleteObject(st->summaryBoldFont);

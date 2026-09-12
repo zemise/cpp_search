@@ -42,6 +42,34 @@ DWORD WINAPI runWork(void* parameter) noexcept {
     return 0;
 }
 
+class CallbackCompletion final : public Completion {
+public:
+    CallbackCompletion(std::weak_ptr<State> state,
+                       std::uint64_t generation,
+                       std::function<void()> callback)
+        : state_(std::move(state)),
+          generation_(generation),
+          callback_(std::move(callback)) {}
+
+    void deliver() noexcept override {
+        auto state = state_.lock();
+        if (!state || !state->active.load(std::memory_order_acquire) ||
+            state->generation.load(std::memory_order_acquire) != generation_) {
+            return;
+        }
+        try {
+            callback_();
+        } catch (...) {
+            // Progress callbacks must not escape the Win32 message loop.
+        }
+    }
+
+private:
+    std::weak_ptr<State> state_;
+    std::uint64_t generation_ = 0;
+    std::function<void()> callback_;
+};
+
 }  // namespace
 
 bool queue(std::unique_ptr<Work> work) noexcept {
@@ -76,7 +104,32 @@ bool post(HWND dispatcherWindow, std::unique_ptr<Completion> completion) noexcep
     return false;
 }
 
+bool postCallback(std::weak_ptr<State> state,
+                  std::uint64_t generation,
+                  HWND dispatcherWindow,
+                  std::function<void()> callback) noexcept {
+    if (!callback) return false;
+    try {
+        return post(dispatcherWindow, std::make_unique<CallbackCompletion>(
+            std::move(state), generation, std::move(callback)));
+    } catch (...) {
+        return false;
+    }
+}
+
 }  // namespace window_task_detail
+
+bool WindowTaskContext::cancelled() const noexcept {
+    auto state = state_.lock();
+    return !state || !state->active.load(std::memory_order_acquire) ||
+           state->generation.load(std::memory_order_acquire) != generation_;
+}
+
+bool WindowTaskContext::post(std::function<void()> callback) const noexcept {
+    if (cancelled()) return false;
+    return window_task_detail::postCallback(
+        state_, generation_, dispatcherWindow_, std::move(callback));
+}
 
 WindowTask::WindowTask()
     : state_(std::make_shared<window_task_detail::State>()) {}

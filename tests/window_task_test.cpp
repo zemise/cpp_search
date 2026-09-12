@@ -33,6 +33,26 @@ bool pumpUntil(const std::function<bool()>& condition, DWORD timeoutMs) {
 int main() {
     {
         app::WindowTask task;
+        int progress = 0;
+        int delivered = 0;
+        assert(task.start<int>(
+            [&progress](app::WindowTaskContext context) {
+                assert(!context.cancelled());
+                assert(context.post([] { /* Proves worker-to-UI delivery. */ }));
+                assert(context.post([&progress] { progress = 3; }));
+                return 9;
+            },
+            [&](std::optional<int> result, std::exception_ptr error) {
+                assert(!error);
+                assert(result && *result == 9);
+                ++delivered;
+            }));
+        assert(pumpUntil([&] { return delivered == 1; }, 3000));
+        assert(progress == 3);
+    }
+
+    {
+        app::WindowTask task;
         int delivered = 0;
         assert(task.start<int>(
             []() -> int { throw std::runtime_error("expected"); },
@@ -89,15 +109,18 @@ int main() {
     {
         app::WindowTask task;
         std::atomic<bool> release{false};
+        std::atomic<bool> cancellationObserved{false};
         int delivered = 0;
         assert(task.start<int>(
-            [&] {
+            [&](app::WindowTaskContext context) {
                 while (!release.load()) Sleep(1);
+                cancellationObserved.store(context.cancelled());
                 return 7;
             },
             [&](std::optional<int>, std::exception_ptr) { ++delivered; }));
         task.cancel();
         release.store(true);
+        assert(pumpUntil([&] { return cancellationObserved.load(); }, 3000));
         pumpUntil([&] { return false; }, 100);
         assert(delivered == 0);
     }
